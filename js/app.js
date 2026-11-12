@@ -447,6 +447,76 @@
     toast(`已登錄自訂標籤「${t}」。新案要保留這類內容，請到「3 專案資料」最下方點選啟用「${t}」。`, 'ok');
   }
 
+  /* ---------- 複選（勾選、Shift 範圍、拖曳、鍵盤） ---------- */
+  const clsSel = () => S.ui.cls.sel || (S.ui.cls.sel = {});
+  function selectedBlocks() {
+    const s = clsSel();
+    return S.master ? S.master.blocks.filter((b) => s[b.id]) : [];
+  }
+  /* 只更新畫面上的勾選狀態，不重畫整頁（拖曳時才順暢） */
+  function setSel(id, on, silent) {
+    const s = clsSel();
+    if (on) s[id] = true;
+    else delete s[id];
+    const tr = document.querySelector(`tr[data-row="${CSS.escape(id)}"]`);
+    if (tr) {
+      tr.classList.toggle('selected', !!on);
+      const cb = tr.querySelector('input.selbox');
+      if (cb) cb.checked = !!on;
+    }
+    if (!silent) updateSelUI();
+  }
+  function selectRange(fromIdx, toIdx, on) {
+    const ids = S.ui.clsPageIds || [];
+    const [a, b] = fromIdx < toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+    for (let i = a; i <= b; i++) if (ids[i]) setSel(ids[i], on, true);
+    updateSelUI();
+  }
+  function updateSelUI() {
+    const n = selectedBlocks().length;
+    document.querySelectorAll('[data-sel-count]').forEach((el) => (el.textContent = n ? `已選取 ${n} 筆` : '尚未選取'));
+    const lbl = document.querySelector('[data-bulk-label]');
+    if (lbl) lbl.textContent = n ? `對已選取的 ${n} 筆：` : `對篩選結果 ${S.ui.clsListCount || 0} 筆：`;
+    document.querySelectorAll('[data-sel-clear]').forEach((el) => (el.disabled = !n));
+    const hb = document.querySelector('input[data-sel-all]');
+    if (hb) {
+      const ids = S.ui.clsPageIds || [];
+      const k = ids.filter((id) => clsSel()[id]).length;
+      hb.checked = k > 0 && k === ids.length;
+      hb.indeterminate = k > 0 && k < ids.length;
+    }
+  }
+  let selDrag = null;
+  document.addEventListener('mouseup', () => (selDrag = null));
+  function selCell(b) {
+    const s = clsSel();
+    return h('td', {
+      class: 'selcell',
+      title: '點選勾選；Shift＋點選選取一段範圍；按住拖曳可連續選取',
+      onmousedown: (ev) => {
+        if (ev.button !== 0) return;
+        ev.preventDefault();
+        const ids = S.ui.clsPageIds || [];
+        const idx = ids.indexOf(b.id);
+        const f = S.ui.cls;
+        if (ev.shiftKey && f.selAnchor && ids.includes(f.selAnchor)) {
+          selectRange(ids.indexOf(f.selAnchor), idx, f.selMode !== false);
+          return;
+        }
+        const mode = !clsSel()[b.id];
+        f.selAnchor = b.id;
+        f.selMode = mode;
+        setSel(b.id, mode);
+        selDrag = { from: idx, mode };
+      },
+      onmouseenter: () => {
+        if (!selDrag) return;
+        const idx = (S.ui.clsPageIds || []).indexOf(b.id);
+        if (idx >= 0) selectRange(selDrag.from, idx, selDrag.mode);
+      },
+    }, h('input', { type: 'checkbox', class: 'selbox', tabindex: -1, checked: !!s[b.id] }));
+  }
+
   /* ---------- 分類修改（單筆、批次、鍵盤共用） ---------- */
   function setOverride(b, patch) {
     const cur = Object.assign({}, S.overrides[b.id] || {}, patch);
@@ -516,6 +586,7 @@
     const shown = list.slice(f.page * PAGE, (f.page + 1) * PAGE);
     S.ui.clsPageIds = shown.map((b) => b.id);
     S.ui.clsPages = pages;
+    S.ui.clsListCount = list.length;
     if (f.cur && !S.ui.clsPageIds.includes(f.cur)) f.cur = null;
     if (!f.cur && f.curAt) f.cur = f.curAt === 'last' ? S.ui.clsPageIds[S.ui.clsPageIds.length - 1] : S.ui.clsPageIds[0];
     f.curAt = null;
@@ -550,12 +621,17 @@
     const bulkCat = h('select', { 'data-bulk': 'cat' }, h('option', { value: '' }, '選擇分類…'), catOpts.map(([v, l]) => h('option', { value: v }, l)));
     const bulkTag = h('input', { type: 'text', 'data-bulk': 'tag', placeholder: '標籤，例：電梯', style: { width: '150px' }, list: 'known-tags' });
     const dl = h('datalist', { id: 'known-tags' }, [...known].map((t) => h('option', { value: t })));
+    const target = () => {
+      const sel = selectedBlocks();
+      return sel.length ? { blocks: sel, what: '已選取的' } : { blocks: list, what: '目前篩選的' };
+    };
     const bulkApply = (fn, label) => {
-      if (!list.length) return;
-      if (list.length > 1 && !confirm(`${label}：套用到目前篩選的 ${list.length} 筆？`)) return;
-      list.forEach(fn);
-      commitEdits(list);
-      toast(`${label}：已套用 ${list.length} 筆`, 'ok');
+      const t = target();
+      if (!t.blocks.length) return;
+      if (t.blocks.length > 1 && !confirm(`${label}：套用到${t.what} ${t.blocks.length} 筆？`)) return;
+      t.blocks.forEach(fn);
+      commitEdits(t.blocks);
+      toast(`${label}：已套用 ${t.blocks.length} 筆`, 'ok');
     };
     const tagOp = (add) => {
       const tags = parseTags(bulkTag.value);
@@ -569,18 +645,26 @@
         setOverride(b, { tags: next });
       }, add ? `加入標籤「${tags.join('、')}」` : `移除標籤「${tags.join('、')}」`);
     };
+    const nSelected = selectedBlocks().length;
+    const selBar = h('div', { class: 'selbar' },
+      h('b', { 'data-sel-count': '' }, nSelected ? `已選取 ${nSelected} 筆` : '尚未選取'),
+      h('button', { class: 'btn small', onclick: () => { shown.forEach((b) => (clsSel()[b.id] = true)); render(); } }, '選取本頁'),
+      h('button', { class: 'btn small', onclick: () => { list.forEach((b) => (clsSel()[b.id] = true)); render(); } }, `選取全部篩選結果（${list.length}）`),
+      h('button', { class: 'btn small', 'data-sel-clear': '', disabled: !nSelected, onclick: () => { S.ui.cls.sel = {}; render(); } }, '取消選取'),
+      h('span', { class: 'muted' }, '在最左欄點選勾選，Shift＋點選選一段範圍，按住拖曳可連續選取；有勾選時，下列批次處理只套用到已選取的列'));
     const bulkBar = h('div', { class: 'bulkbar' },
-      h('b', {}, `對篩選結果 ${list.length} 筆：`),
+      h('b', { 'data-bulk-label': '' }, nSelected ? `對已選取的 ${nSelected} 筆：` : `對篩選結果 ${list.length} 筆：`),
       h('span', {}, '分類設為 '), bulkCat,
       h('button', { class: 'btn small', onclick: () => { if (!bulkCat.value) return toast('請先選擇分類'); const c = bulkCat.value; bulkApply((b) => setOverride(b, { cat: c }), `分類設為 ${c}`); } }, '套用'),
       h('span', { class: 'sep' }), bulkTag, dl,
       h('button', { class: 'btn small', onclick: () => tagOp(true) }, '加入標籤'),
       h('button', { class: 'btn small', onclick: () => tagOp(false) }, '移除標籤'),
       h('span', { class: 'sep' }),
-      h('button', { class: 'btn small primary', onclick: () => { const todo = list.filter((b) => RG.mem.memorable(b)); if (!todo.length) return; if (todo.length > 1 && !confirm(`將篩選結果 ${todo.length} 筆標為「已確認」並記入記憶庫？`)) return; remember(todo); toast(`已確認 ${todo.length} 筆`, 'ok'); render(); } }, '全部確認'));
+      h('button', { class: 'btn small primary', onclick: () => { const t = target(); const todo = t.blocks.filter((b) => RG.mem.memorable(b)); if (!todo.length) return; if (todo.length > 1 && !confirm(`將${t.what} ${todo.length} 筆標為「已確認」並記入記憶庫？`)) return; remember(todo); toast(`已確認 ${todo.length} 筆`, 'ok'); render(); } }, '全部確認'));
 
     // ---- 表頭篩選列 ----
     const filterRow = h('tr', { class: 'filters' },
+      h('th', {}),
       h('th', {}, fsel('chapter', [['', '全部章節'], ...chapters.map((c) => [c, c])]),
         fsel('mem', [['', '全部記憶狀態'], ['todo', '需確認'], ['exact', '沿用記憶'], ['fuzzy', '推定'], ['new', '新段落'], ['confirmed', '已確認']])),
       h('th', {}, fsel('kind', [['', '全部'], ...Object.entries(K.KIND_LABEL).filter(([k]) => !['empty', 'other'].includes(k)).map(([k, l]) => [k, l]), ['imgtable', '表格截圖']])),
@@ -623,13 +707,14 @@
           }
         },
       });
-      return h('tr', { class: [o ? 'modified' : '', f.cur === b.id ? 'cur' : ''].join(' '), 'data-row': b.id, onclick: (ev) => {
+      return h('tr', { class: [o ? 'modified' : '', f.cur === b.id ? 'cur' : '', clsSel()[b.id] ? 'selected' : ''].join(' '), 'data-row': b.id, onclick: (ev) => {
         if (f.cur === b.id) return;
         const prev = document.querySelector('tr.cur');
         if (prev) prev.classList.remove('cur');
         ev.currentTarget.classList.add('cur');
         f.cur = b.id;
       } },
+        selCell(b),
         h('td', {}, h('div', {}, b.id), h('div', { class: 'reason' }, posOf(b)), memBadge(b),
           needsReview(b) ? h('div', {}, h('button', { class: 'btn small', title: '目前的分類與標籤正確，記入記憶（鍵盤：Enter）', onclick: () => { f.cur = b.id; remember([b]); render(); } }, '✓ 確認')) : null),
         h('td', {}, h('span', { class: 'badge' }, kindLabel(b))),
@@ -647,11 +732,14 @@
           o ? h('div', {}, h('button', { class: 'btn small', onclick: () => { delete S.overrides[b.id]; f.cur = b.id; commitEdits([b]); } }, '還原自動判斷')) : null));
     });
     wrap.appendChild(h('div', { class: 'card' },
+      selBar,
       bulkBar,
-      h('div', { class: 'kbd-help' }, '鍵盤：', h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' 選列　', h('kbd', {}, 'F'), h('kbd', {}, 'T'), h('kbd', {}, 'C'), h('kbd', {}, 'M'), ' 設定分類（C 沒有標籤時自動進入標籤欄）　', h('kbd', {}, 'Enter'), ' 確認並跳下一列　', h('kbd', {}, 'E'), ' 編輯標籤　', h('kbd', {}, 'Esc'), ' 離開輸入欄'),
+      h('div', { class: 'kbd-help' }, '鍵盤：', h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' 選列　', h('kbd', {}, 'F'), h('kbd', {}, 'T'), h('kbd', {}, 'C'), h('kbd', {}, 'M'), ' 設定分類（C 沒有標籤時自動進入標籤欄）　', h('kbd', {}, 'Enter'), ' 確認並跳下一列　', h('kbd', {}, 'E'), ' 編輯標籤　', h('kbd', {}, '空白鍵'), ' 勾選　', h('kbd', {}, 'Shift'), '＋', h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' 延伸勾選　', h('kbd', {}, 'Esc'), ' 離開輸入欄（完整說明見上方「分類代號與確認標籤說明」）'),
       h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' },
-        h('thead', { class: 'sticky' }, h('tr', {}, ['區塊', '類型', '內容', '自動判斷', '確認分類', '確認標籤'].map((x) => h('th', {}, x))), filterRow),
-        h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '沒有符合篩選條件的項目'))))),
+        h('thead', { class: 'sticky' }, h('tr', {},
+          h('th', { class: 'selcell', title: '選取／取消本頁全部' }, h('input', { type: 'checkbox', 'data-sel-all': '', checked: shown.length > 0 && shown.every((b) => clsSel()[b.id]), onchange: (ev) => { shown.forEach((b) => setSel(b.id, ev.target.checked, true)); updateSelUI(); } })),
+          ['區塊', '類型', '內容', '自動判斷', '確認分類', '確認標籤'].map((x) => h('th', {}, x))), filterRow),
+        h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 7, class: 'muted' }, '沒有符合篩選條件的項目'))))),
       pager(f, pages, list.length)));
     return wrap;
   }
@@ -668,7 +756,8 @@
     if (!ids.length) return;
     let i = ids.indexOf(f.cur);
     const byId = (id) => S.master.blocks.find((b) => b.id === id);
-    const move = (d) => {
+    const move = (d, extend) => {
+      if (extend && f.cur) clsSel()[f.cur] = true;
       if (i < 0) i = d > 0 ? -1 : ids.length;
       const j = i + d;
       if (j >= ids.length) {
@@ -684,6 +773,10 @@
           f.curAt = 'last';
         } else f.cur = ids[0];
       } else f.cur = ids[j];
+      if (extend) {
+        if (f.cur) clsSel()[f.cur] = true;
+        else S.ui.kbSelectCur = true;
+      }
       S.ui.kbScroll = true;
       render();
     };
@@ -691,10 +784,14 @@
     const up = key.length === 1 ? key.toUpperCase() : key;
     if (key === 'ArrowDown' || key === 'j') {
       ev.preventDefault();
-      move(1);
+      move(1, ev.shiftKey);
     } else if (key === 'ArrowUp' || key === 'k') {
       ev.preventDefault();
-      move(-1);
+      move(-1, ev.shiftKey);
+    } else if (key === ' ') {
+      if (i < 0) return;
+      ev.preventDefault();
+      setSel(f.cur, !clsSel()[f.cur]);
     } else if (['F', 'T', 'C', 'M'].includes(up)) {
       if (i < 0) return;
       ev.preventDefault();
@@ -727,6 +824,10 @@
     } else if (S.ui.kbReturn) {
       S.ui.kbReturn = null;
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    }
+    if (S.ui.kbSelectCur && f.cur) {
+      S.ui.kbSelectCur = false;
+      setSel(f.cur, true);
     }
     if (S.ui.kbScroll && f.cur) {
       S.ui.kbScroll = false;
@@ -829,6 +930,25 @@
           row('C', '依構造、工項、環境條件決定是否出現：擋土、開挖、電梯、骨櫃…', '「確認標籤」全部符合新案條件才保留（並替換其中的專案事實），否則整段／整表刪除'),
           row('M', '固定句型中嵌入專案事實：「本案為地下1層、地上4層RC造…」', '只替換句中的專案事實、保留句型；若替換後可能不通（如地下0層）或句中提到新案沒有的工項 → 淺藍底＋註解「待審」'))),
       h('div', { class: 'muted', style: { marginTop: '8px' } }, '圖片與表格截圖（內容是圖、無法編輯的表格）：F 產出時換成紅框【待補圖：圖x-x 名稱】、T 沿用原圖、C 依確認標籤保留或刪除；依圖名自動初判，沒有圖名或無法判斷時預設為 F。文字方塊內的文字與頁首頁尾，比照所在段落處理專案事實替換與錯字更正。'),
+      h('h3', { style: { fontSize: '14px', margin: '14px 0 6px' } }, '鍵盤快速分類'),
+      h('div', { class: 'muted', style: { marginBottom: '6px' } }, '先用滑鼠點清單中的任一列（該列以藍底標示為「目前列」），之後就可以用鍵盤操作。游標在輸入欄或下拉選單裡時，鍵盤快速鍵不會作用。'),
+      h('table', { class: 'data', style: { maxWidth: '760px' } },
+        h('thead', {}, h('tr', {}, h('th', { style: { width: '170px' } }, '按鍵'), h('th', {}, '動作'))),
+        h('tbody', {},
+          [[['↑', '↓'], '移到上一列／下一列；到頁首或頁尾會自動翻頁'],
+           [['F', 'T', 'C', 'M'], '把目前列設為 F 專案事實／T 通用範本／C 條件式／M 混合。按 C 時若還沒有標籤，會自動進入標籤欄'],
+           [['Enter'], '確認目前列（記入記憶庫），並跳到下一列'],
+           [['E'], '編輯目前列的標籤'],
+           [['空白鍵'], '勾選／取消勾選目前列'],
+           [['Shift', '↑', '↓'], '一邊移動一邊勾選，用來連續選取'],
+           [['Enter（在標籤欄）'], '儲存標籤並離開標籤欄，接著可繼續用方向鍵'],
+           [['Esc（在標籤欄）'], '取消這次修改並離開標籤欄']].map(([keys, desc]) => h('tr', {}, h('td', {}, keys.map((k) => h('kbd', {}, k))), h('td', {}, desc))))),
+      h('h3', { style: { fontSize: '14px', margin: '14px 0 6px' } }, '複選與批次處理'),
+      h('ul', { class: 'muted', style: { margin: '0 0 0 18px', padding: 0 } },
+        h('li', {}, '在清單最左欄點一下勾選；按住 Shift 再點另一列，會選取兩列之間的整段範圍；在最左欄按住滑鼠往下拖曳，可以連續選取。'),
+        h('li', {}, '表頭的勾選框可選取本頁全部；也可以按「選取全部篩選結果」，一次選取所有符合篩選條件的項目（可跨頁）。'),
+        h('li', {}, '有勾選時，「分類設為」「加入／移除標籤」「全部確認」只套用到已選取的列；沒有勾選時，套用到目前的篩選結果。'),
+        h('li', {}, '勾選會一直保留（換頁、換篩選都不會消失），做完請按「取消選取」。')),
       h('div', { class: 'muted', style: { marginTop: '8px' } }, '確認標籤：只有 C 類會用到。填寫這段內容適用的條件（以頓號分隔），新案必須「全部」具備才保留；例如「擋土柱+斜撐、地下1層」表示有地下室且採擋土柱工法的案子才會出現。新案具備哪些標籤，在「3 專案資料」最下方決定。F／T／M 類填了標籤不會有作用。'));
   }
   function pager(f, pages, total) {

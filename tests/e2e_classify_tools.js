@@ -115,6 +115,58 @@ const ok = (c, m) => {
   ok((await page.evaluate(() => document.activeElement.tagName)) !== 'INPUT', 'Esc 離開輸入欄');
   await page.screenshot({ path: path.join(process.env.OUT_DIR || path.join(__dirname, 'out'), 'classify-tools.png') }).catch(() => {});
 
+  // ---------- 4b. 複選 ----------
+  await page.evaluate(() => { RG.app.S.ui.cls.sel = {}; RG.app.render(); });
+  const pid = await page.evaluate(() => RG.app.S.ui.clsPageIds);
+  const selIds = () => page.evaluate(() => Object.keys(RG.app.S.ui.cls.sel || {}).filter((k) => RG.app.S.ui.cls.sel[k]));
+  const cell = (id) => `tr[data-row="${id}"] td.selcell`;
+  await page.click(cell(pid[10]));
+  await page.click(cell(pid[13]), { modifiers: ['Shift'] });
+  let sel = await selIds();
+  ok(sel.length === 4 && [10, 11, 12, 13].every((i) => sel.includes(pid[i])), '點選＋Shift 點選：選取一段範圍（4 筆）');
+  ok((await page.textContent('[data-bulk-label]')).includes('已選取的 4 筆'), '批次列改為「對已選取的 4 筆」');
+  ok(await page.$eval(`tr[data-row="${pid[11]}"]`, (tr) => tr.classList.contains('selected') && tr.querySelector('input.selbox').checked), '已選取的列有勾選與底色');
+  const beforeOthers = await page.evaluate((ids) => ids.map((id) => RG.kb.effective(RG.app.S.master.blocks.find((b) => b.id === id), RG.app.S.overrides).cat), [pid[9], pid[14]]);
+  await page.selectOption('select[data-bulk="cat"]', 'M');
+  await page.click('.bulkbar button:has-text("套用")');
+  const cats = await page.evaluate((ids) => ids.map((id) => RG.kb.effective(RG.app.S.master.blocks.find((b) => b.id === id), RG.app.S.overrides).cat), [pid[10], pid[11], pid[12], pid[13], pid[9], pid[14]]);
+  ok(cats.slice(0, 4).every((c) => c === 'M'), '批次分類只套用到已選取的 4 筆');
+  ok(cats[4] === beforeOthers[0] && cats[5] === beforeOthers[1], '未選取的列不受影響');
+  ok((await selIds()).length === 4, '套用後勾選保留，可以繼續做其他批次處理');
+  await page.click('button:has-text("取消選取")');
+  ok((await selIds()).length === 0, '取消選取');
+  // 拖曳
+  const box = async (id) => (await page.$(cell(id))).boundingBox();
+  await page.$eval(cell(pid[22]), (el) => el.scrollIntoView({ block: 'center' })); // 讓 20～24 列都在清單可視範圍內
+  const b1 = await box(pid[20]);
+  await page.mouse.move(b1.x + b1.width / 2, b1.y + b1.height / 2);
+  await page.mouse.down();
+  for (const i of [21, 22, 23, 24]) {
+    const bb = await box(pid[i]);
+    await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2, { steps: 3 });
+  }
+  await page.mouse.up();
+  sel = await selIds();
+  ok(sel.length === 5 && [20, 21, 22, 23, 24].every((i) => sel.includes(pid[i])), '按住拖曳連續選取（5 筆）');
+  // 表頭全選
+  await page.click('input[data-sel-all]');
+  ok((await selIds()).length === pid.length, '表頭勾選框選取本頁全部');
+  await page.click('button:has-text("取消選取")');
+  // 鍵盤：空白鍵、Shift+↓
+  await page.click(`tr[data-row="${pid[30]}"] td:nth-child(2)`);
+  await page.keyboard.press(' ');
+  ok((await selIds()).join() === pid[30], '空白鍵勾選目前列');
+  await page.keyboard.press('Shift+ArrowDown');
+  await page.keyboard.press('Shift+ArrowDown');
+  sel = await selIds();
+  ok(sel.length === 3 && [30, 31, 32].every((i) => sel.includes(pid[i])), 'Shift＋↓ 一邊移動一邊勾選');
+  await page.click('button:has-text("選取全部篩選結果")');
+  ok((await selIds()).length === (await page.evaluate(() => RG.app.S.ui.clsListCount)), '選取全部篩選結果');
+  await page.click('button:has-text("取消選取")');
+  // 說明區塊
+  const legend = await page.textContent('details.card');
+  ok(legend.includes('鍵盤快速分類') && legend.includes('Shift') && legend.includes('複選與批次處理'), '說明區塊含鍵盤快速分類與複選說明');
+
   // ---------- 5. 工項規劃的表頭篩選與批次 ----------
   await page.evaluate(() => RG.app.go('plan'));
   await page.selectOption('select[data-filter="kind"]', 'figure');

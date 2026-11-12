@@ -199,3 +199,10 @@ table.data tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
 .bad-input { border-color: var(--bad) !important; background: var(--bad-soft) !important; }
 .tag-warn { font-size: 12px; color: var(--bad); margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .tag-hint { font-size: 12px; color: var(--warn); margin-top: 3px; }
+
+/* 複選 */
+.selbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 13px; }
+td.selcell, th.selcell { width: 30px; text-align: center; cursor: pointer; user-select: none; }
+td.selcell input { pointer-events: none; }
+table.data tr.selected td { background: #e9f3ff !important; }
+table.data tr.selected.cur td { background: #d6e8ff !important; }
