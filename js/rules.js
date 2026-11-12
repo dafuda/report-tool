@@ -193,6 +193,9 @@
       { field: '設施用途', match: '滯洪', tags: ['滯洪池'] },
     ],
 
+    /* 自訂條件標籤（分類頁「登錄為自訂標籤」會加到這裡；登錄後不再視為打錯字） */
+    customTags: [],
+
     /* 自動更正清單（第 11 節，對應 rules/known_fixes.yaml）；find 為正規表示式 */
     knownFixes: [
       { find: '(?<!逃)生方向指示燈', replace: '逃生方向指示燈', note: '少「逃」字' },

@@ -50,7 +50,7 @@ const ok = (c, m) => {
   const after2 = await page.$eval(wrapSel, (w) => w.scrollTop);
   ok(Math.abs(after2 - before) <= 2, `修改標籤後清單位置不變（${after2}）`);
   // 換篩選條件時回到清單頂端
-  await page.selectOption('main select >> nth=1', 'C');
+  await page.selectOption('select[data-filter="cat"]', 'C');
   const after3 = await page.$eval(wrapSel, (w) => w.scrollTop);
   ok(after3 === 0, '換篩選條件時清單回到頂端');
   ok(errors.length === 0, '頁面沒有 JavaScript 錯誤' + (errors.length ? '：' + errors.join('; ') : ''));

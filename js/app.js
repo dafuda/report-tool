@@ -28,7 +28,7 @@
     lastCheck: null,
     restore: null,
     view: 'master',
-    ui: { cls: { page: 0, chapter: '', cat: '', kind: '', q: '', onlyFlag: false, onlyMod: false, mem: '' }, memv: { page: 0, q: '', cat: '', tag: '', master: '', kind: '', check: '', sel: {} }, plan: { page: 0, filter: 'all', q: '' }, showMaster: false, diffType: '', checkItem: '' },
+    ui: { cls: { page: 0, chapter: '', cat: '', kind: '', q: '', onlyFlag: false, onlyMod: false, mem: '', autoCat: '', autoTag: '', tagF: '', cur: null }, memv: { page: 0, q: '', cat: '', tag: '', master: '', kind: '', check: '', sel: {} }, plan: { page: 0, q: '', chapter: '', kind: '', tagF: '', result: '', decision: '' }, showMaster: false, diffType: '', checkItem: '' },
   };
   const PERSIST = ['facts', 'rules', 'overrides', 'planOverrides', 'manualTags', 'options', 'confirmed', 'masterSig', 'projectName'];
 
@@ -212,7 +212,7 @@
   let lastListSig = '';
   const listSig = () => {
     const st = { classify: S.ui.cls, plan: S.ui.plan, memory: S.ui.memv, generate: { t: S.ui.diffType }, check: { i: S.ui.checkItem } }[S.view] || {};
-    return S.view + ':' + JSON.stringify(st, (k, v) => (k === 'sel' ? undefined : v));
+    return S.view + ':' + JSON.stringify(st, (k, v) => (['sel', 'cur', 'curAt'].includes(k) ? undefined : v));
   };
   function render() {
     renderNav();
@@ -229,12 +229,13 @@
     main.querySelectorAll('.tbl-wrap').forEach((w, i) => {
       if (wraps[i] != null) w.scrollTop = wraps[i];
     });
-    if (focusKey) {
+    if (focusKey && !S.ui.kbReturn) {
       const el = main.querySelector(`[data-fk="${CSS.escape(focusKey)}"]`);
       if (el) el.focus({ preventScroll: true });
     }
     window.scrollTo(0, scroll);
     lastListSig = sig;
+    afterRenderKeyboard();
   }
   const needMaster = () =>
     h('div', { class: 'card' }, h('div', { class: 'note warn' }, '請先在「1 母本解析」讀入母本 .docx。'), h('button', { class: 'btn primary', onclick: () => go('master') }, '前往母本解析'));
@@ -413,37 +414,120 @@
    * 2. 分類與標籤確認
    * ==================================================================== */
   const PAGE = 100;
-  function viewClassify() {
-    const wrap = h('div', {}, h('h1', { class: 'view-title' }, '2 分類與標籤確認'),
-      h('p', { class: 'view-desc' }, '每個段落與表格都先由工具初判為 F 專案事實、T 通用範本、C 條件式、M 混合，並標上適用條件標籤。請確認或修改（只確認有疑義的也可以）。修改過的列會以淺黃底顯示。'));
-    wrap.appendChild(classifyLegend());
-    if (!S.master) return wrap.appendChild(needMaster()), wrap;
-    const f = S.ui.cls;
-    const blocks = S.master.blocks.filter((b) => !['empty', 'other'].includes(b.kind));
-    const counts = { F: 0, T: 0, C: 0, M: 0 };
-    blocks.forEach((b) => counts[K.effective(b, S.overrides).cat]++);
-    const chapters = [...new Set(blocks.map((b) => b.chapter))];
+  /* ---------- 標籤防呆 ---------- */
+  function knownTags() {
+    const set = new Set(Object.values(RG.TAG_GROUPS).flat());
+    Object.keys(S.rules.tagKeywords || {}).forEach((t) => set.add(t));
+    (S.rules.tagRules || []).forEach((r) => (r.tags || []).forEach((t) => set.add(t)));
+    (S.rules.customTags || []).forEach((t) => set.add(t));
+    Object.keys(S.manualTags || {}).forEach((t) => set.add(t));
+    return set;
+  }
+  const tagNorm = (t) => String(t).normalize('NFKC').replace(/[\s+＋/／・·]/g, '');
+  /* 不認識的標籤 → 找最接近的已知標籤 */
+  function suggestTag(t, known) {
+    const n = tagNorm(t);
+    let best = null;
+    let bestS = 0;
+    for (const k of known) {
+      const kn = tagNorm(k);
+      let s = kn === n ? 1 : RG.mem.dice(n, kn);
+      if (s < 1 && n.length >= 2 && (kn.includes(n) || n.includes(kn))) s = Math.max(s, 0.6);
+      if (s > bestS) {
+        bestS = s;
+        best = k;
+      }
+    }
+    return bestS >= 0.5 ? best : null;
+  }
+  const parseTags = (v) => String(v || '').split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean);
+  function registerCustomTag(t) {
+    S.rules.customTags = [...new Set([...(S.rules.customTags || []), t])];
+    save();
+    toast(`已登錄自訂標籤「${t}」。新案要保留這類內容，請到「3 專案資料」最下方點選啟用「${t}」。`, 'ok');
+  }
+
+  /* ---------- 分類修改（單筆、批次、鍵盤共用） ---------- */
+  function setOverride(b, patch) {
+    const cur = Object.assign({}, S.overrides[b.id] || {}, patch);
+    if (cur.cat === b.auto.cat || !cur.cat) delete cur.cat;
+    if (cur.tags && cur.tags.join('、') === b.auto.tags.join('、')) delete cur.tags;
+    if (Object.keys(cur).length) S.overrides[b.id] = cur;
+    else delete S.overrides[b.id];
+  }
+  function commitEdits(blocks) {
+    remember(blocks);
+    invalidateOutputs();
+    save();
+    render();
+  }
+
+  /* ---------- 篩選 ---------- */
+  function classifyFilter(blocks, f, known) {
     const q = f.q.trim();
-    const list = blocks.filter((b) => {
+    return blocks.filter((b) => {
       const e = K.effective(b, S.overrides);
       if (f.chapter && b.chapter !== f.chapter) return false;
       if (f.cat && e.cat !== f.cat) return false;
-      if (f.kind && b.kind !== f.kind) return false;
+      if (f.kind && (f.kind === 'imgtable' ? !(b.kind === 'figure' && b.capType === '表') : b.kind !== f.kind)) return false;
+      if (f.autoCat && b.auto.cat !== f.autoCat) return false;
+      if (f.autoTag && !(f.autoTag === '(none)' ? !b.auto.tags.length : b.auto.tags.includes(f.autoTag))) return false;
+      if (f.tagF) {
+        if (f.tagF === '(none)' && e.tags.length) return false;
+        if (f.tagF === '(cnotag)' && !(e.cat === 'C' && !e.tags.length)) return false;
+        if (f.tagF === '(unknown)' && !e.tags.some((t) => !known.has(t))) return false;
+        if (!f.tagF.startsWith('(') && !e.tags.includes(f.tagF)) return false;
+      }
       if (f.onlyFlag && e.cat === 'T') return false;
       if (f.onlyMod && !S.overrides[b.id]) return false;
       if (f.mem === 'todo' && !needsReview(b)) return false;
       if (f.mem && f.mem !== 'todo' && !(b.mem && b.mem.state === f.mem)) return false;
-      if (q && !(b.text.includes(q) || e.tags.join(' ').includes(q) || b.id === q || ('表' + (b.capNo || '')) === q)) return false;
+      if (q && !(b.text.includes(q) || blockText(b).includes(q) || e.tags.join(' ').includes(q) || b.id === q || ((b.capType || '表') + (b.capNo || '')) === q)) return false;
       return true;
     });
+  }
+  const CLS_FILTER_KEYS = ['chapter', 'cat', 'kind', 'autoCat', 'autoTag', 'tagF', 'q', 'mem', 'onlyFlag', 'onlyMod'];
+
+  function viewClassify() {
+    const wrap = h('div', {}, h('h1', { class: 'view-title' }, '2 分類與標籤確認'),
+      h('p', { class: 'view-desc' }, '每個段落與表格都先由工具初判為 F 專案事實、T 通用範本、C 條件式、M 混合，並標上適用條件標籤。用表頭的篩選把同性質的項目找出來，可以一起設定分類、加減標籤或全部確認；也可以用鍵盤快速分類。修改過的列會以淺黃底顯示。'));
+    wrap.appendChild(classifyLegend());
+    if (!S.master) return wrap.appendChild(needMaster()), wrap;
+    const f = S.ui.cls;
+    const known = knownTags();
+    const blocks = S.master.blocks.filter((b) => !['empty', 'other'].includes(b.kind));
+    const counts = { F: 0, T: 0, C: 0, M: 0 };
+    let unknownCount = 0;
+    let cNoTag = 0;
+    const usedTags = new Set();
+    const autoTags = new Set();
+    for (const b of blocks) {
+      const e = K.effective(b, S.overrides);
+      counts[e.cat]++;
+      e.tags.forEach((t) => usedTags.add(t));
+      b.auto.tags.forEach((t) => autoTags.add(t));
+      if (e.tags.some((t) => !known.has(t))) unknownCount++;
+      if (e.cat === 'C' && !e.tags.length) cNoTag++;
+    }
+    const chapters = [...new Set(blocks.map((b) => b.chapter))];
+    const list = classifyFilter(blocks, f, known);
     const pages = Math.max(1, Math.ceil(list.length / PAGE));
     f.page = Math.min(f.page, pages - 1);
+    const shown = list.slice(f.page * PAGE, (f.page + 1) * PAGE);
+    S.ui.clsPageIds = shown.map((b) => b.id);
+    S.ui.clsPages = pages;
+    if (f.cur && !S.ui.clsPageIds.includes(f.cur)) f.cur = null;
+    if (!f.cur && f.curAt) f.cur = f.curAt === 'last' ? S.ui.clsPageIds[S.ui.clsPageIds.length - 1] : S.ui.clsPageIds[0];
+    f.curAt = null;
+
     const upd = (k, v) => {
       f[k] = v;
       f.page = 0;
       render();
     };
-    const sel = (k, opts) => h('select', { onchange: (e) => upd(k, e.target.value) }, opts.map(([v, l]) => h('option', { value: v, selected: f[k] === v }, l)));
+    const fsel = (k, opts, w = '100%') => h('select', { 'data-filter': k, class: f[k] ? 'filter-on' : '', style: { width: w }, onchange: (e) => upd(k, e.target.value) }, opts.map(([v, l]) => h('option', { value: v, selected: f[k] === v }, l)));
+    const anyFilter = CLS_FILTER_KEYS.some((k) => f[k]);
+    const catOpts = Object.entries(K.CATS).map(([c, l]) => [c, `${c} ${l}`]);
 
     wrap.appendChild(memoryCard(blocks, list));
     wrap.appendChild(h('div', { class: 'card' },
@@ -453,43 +537,202 @@
           h('button', { class: 'btn', onclick: exportClassify }, '匯出分類確認表 .xlsx'),
           pickBtn('匯入確認結果', '.xlsx', importClassify),
           h('button', { class: 'btn', onclick: reclassify, title: '依目前的規則重新初判（保留您的修改）' }, '重新初判'))),
+      unknownCount || cNoTag ? h('div', { class: 'note warn', style: { marginTop: '10px' } },
+        unknownCount ? h('span', {}, `有 ${unknownCount} 筆使用了工具不認識的標籤（可能打錯字，產出時會被刪除）。`, h('button', { class: 'btn small', onclick: () => upd('tagF', '(unknown)') }, '只看這些'), ' ') : null,
+        cNoTag ? h('span', {}, `有 ${cNoTag} 筆是 C 類卻沒有標籤（產出時一律保留）。`, h('button', { class: 'btn small', onclick: () => upd('tagF', '(cnotag)') }, '只看這些')) : null) : null,
       h('div', { class: 'row', style: { marginTop: '10px' } },
-        sel('chapter', [['', '全部章節'], ...chapters.map((c) => [c, c])]),
-        sel('cat', [['', '全部分類'], ...Object.entries(K.CATS).map(([c, l]) => [c, `${c} ${l}`])]),
-        sel('kind', [['', '全部類型'], ...Object.entries(K.KIND_LABEL).filter(([k]) => !['empty', 'other'].includes(k)).map(([k, l]) => [k, l])]),
-        h('input', { type: 'search', placeholder: '搜尋文字、標籤、表號（如 表4-13）', value: f.q, style: { width: '260px' }, onchange: (e) => upd('q', e.target.value) }),
         h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: f.onlyFlag, onchange: (e) => upd('onlyFlag', e.target.checked) }), '只看 F／C／M'),
         h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: f.onlyMod, onchange: (e) => upd('onlyMod', e.target.checked) }), '只看已修改'),
-        sel('mem', [['', '全部記憶狀態'], ['todo', '需確認（推定＋新段落）'], ['exact', '完全相同沿用'], ['fuzzy', '依前版推定'], ['new', '新段落'], ['confirmed', '本次已確認']]))));
+        anyFilter ? h('button', { class: 'btn small', onclick: () => { CLS_FILTER_KEYS.forEach((k) => (f[k] = typeof f[k] === 'boolean' ? false : '')); f.page = 0; render(); } }, '清除所有篩選') : null,
+        h('span', { class: 'muted' }, anyFilter ? `篩選結果 ${list.length} 筆` : `共 ${list.length} 筆`))));
 
-    const rows = list.slice(f.page * PAGE, (f.page + 1) * PAGE).map((b) => {
+    // ---- 批次處理篩選結果 ----
+    const bulkCat = h('select', { 'data-bulk': 'cat' }, h('option', { value: '' }, '選擇分類…'), catOpts.map(([v, l]) => h('option', { value: v }, l)));
+    const bulkTag = h('input', { type: 'text', 'data-bulk': 'tag', placeholder: '標籤，例：電梯', style: { width: '150px' }, list: 'known-tags' });
+    const dl = h('datalist', { id: 'known-tags' }, [...known].map((t) => h('option', { value: t })));
+    const bulkApply = (fn, label) => {
+      if (!list.length) return;
+      if (list.length > 1 && !confirm(`${label}：套用到目前篩選的 ${list.length} 筆？`)) return;
+      list.forEach(fn);
+      commitEdits(list);
+      toast(`${label}：已套用 ${list.length} 筆`, 'ok');
+    };
+    const tagOp = (add) => {
+      const tags = parseTags(bulkTag.value);
+      if (!tags.length) return toast('請先輸入標籤');
+      const bad = tags.filter((t) => !known.has(t));
+      if (add && bad.length && !confirm(`「${bad.join('、')}」不是工具認識的標籤${bad.map((t) => suggestTag(t, known)).filter(Boolean).length ? `（是不是「${bad.map((t) => suggestTag(t, known)).filter(Boolean).join('、')}」？）` : ''}。\n仍要加入嗎？加入後會登錄為自訂標籤。`)) return;
+      if (add) bad.forEach((t) => (S.rules.customTags = [...new Set([...(S.rules.customTags || []), t])]));
+      bulkApply((b) => {
+        const e = K.effective(b, S.overrides);
+        const next = add ? [...new Set([...e.tags, ...tags])] : e.tags.filter((t) => !tags.includes(t));
+        setOverride(b, { tags: next });
+      }, add ? `加入標籤「${tags.join('、')}」` : `移除標籤「${tags.join('、')}」`);
+    };
+    const bulkBar = h('div', { class: 'bulkbar' },
+      h('b', {}, `對篩選結果 ${list.length} 筆：`),
+      h('span', {}, '分類設為 '), bulkCat,
+      h('button', { class: 'btn small', onclick: () => { if (!bulkCat.value) return toast('請先選擇分類'); const c = bulkCat.value; bulkApply((b) => setOverride(b, { cat: c }), `分類設為 ${c}`); } }, '套用'),
+      h('span', { class: 'sep' }), bulkTag, dl,
+      h('button', { class: 'btn small', onclick: () => tagOp(true) }, '加入標籤'),
+      h('button', { class: 'btn small', onclick: () => tagOp(false) }, '移除標籤'),
+      h('span', { class: 'sep' }),
+      h('button', { class: 'btn small primary', onclick: () => { const todo = list.filter((b) => RG.mem.memorable(b)); if (!todo.length) return; if (todo.length > 1 && !confirm(`將篩選結果 ${todo.length} 筆標為「已確認」並記入記憶庫？`)) return; remember(todo); toast(`已確認 ${todo.length} 筆`, 'ok'); render(); } }, '全部確認'));
+
+    // ---- 表頭篩選列 ----
+    const filterRow = h('tr', { class: 'filters' },
+      h('th', {}, fsel('chapter', [['', '全部章節'], ...chapters.map((c) => [c, c])]),
+        fsel('mem', [['', '全部記憶狀態'], ['todo', '需確認'], ['exact', '沿用記憶'], ['fuzzy', '推定'], ['new', '新段落'], ['confirmed', '已確認']])),
+      h('th', {}, fsel('kind', [['', '全部'], ...Object.entries(K.KIND_LABEL).filter(([k]) => !['empty', 'other'].includes(k)).map(([k, l]) => [k, l]), ['imgtable', '表格截圖']])),
+      h('th', {}, h('input', { type: 'search', 'data-filter': 'q', class: f.q ? 'filter-on' : '', placeholder: '搜尋文字、表號（如 表4-13）', value: f.q, style: { width: '100%' }, onchange: (e) => upd('q', e.target.value) })),
+      h('th', {}, fsel('autoCat', [['', '全部分類'], ...catOpts]), fsel('autoTag', [['', '全部標籤'], ['(none)', '（沒有標籤）'], ...[...autoTags].sort().map((t) => [t, t])])),
+      h('th', {}, fsel('cat', [['', '全部'], ...catOpts])),
+      h('th', {}, fsel('tagF', [['', '全部'], ['(none)', '（沒有標籤）'], ['(cnotag)', '（C 類沒有標籤）'], ['(unknown)', '（不認識的標籤）'], ...[...usedTags].sort().map((t) => [t, t])])));
+
+    const rows = shown.map((b) => {
       const e = K.effective(b, S.overrides);
       const o = S.overrides[b.id];
       const setO = (patch) => {
-        const cur = Object.assign({}, S.overrides[b.id] || {}, patch);
-        if (cur.cat === b.auto.cat || !cur.cat) delete cur.cat;
-        if (cur.tags && cur.tags.join('、') === b.auto.tags.join('、')) delete cur.tags;
-        if (Object.keys(cur).length) S.overrides[b.id] = cur;
-        else delete S.overrides[b.id];
-        remember([b]);
-        invalidateOutputs();
-        save();
-        render();
+        setOverride(b, patch);
+        f.cur = b.id;
+        commitEdits([b]);
       };
-      return h('tr', { class: o ? 'modified' : '' },
+      const unknown = e.tags.filter((t) => !known.has(t));
+      const tagInput = h('input', {
+        type: 'text', 'data-fk': b.id + ':tags', list: 'known-tags', value: e.tags.join('、'),
+        class: unknown.length ? 'bad-input' : '',
+        placeholder: e.cat === 'C' ? '例：擋土柱+斜撐、地下1層' : '僅 C 類使用',
+        title: e.cat === 'C' ? '新案必須具備全部標籤，這段才會保留。按 Enter 完成、Esc 取消' : '只有 C 條件式會用到標籤；此分類填了也不影響產出',
+        style: { width: '200px', opacity: e.cat === 'C' ? 1 : 0.5 },
+        onchange: (ev) => setO({ tags: parseTags(ev.target.value) }),
+        onkeydown: (ev) => {
+          if (ev.key === 'Enter' || ev.key === 'Escape') ev.stopPropagation(); // 不要再觸發整列的鍵盤操作
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            f.cur = b.id;
+            S.ui.kbReturn = b.id;
+            const same = parseTags(ev.target.value).join('、') === e.tags.join('、');
+            ev.target.blur(); // 有修改時會觸發 change 並重畫
+            if (same) render();
+          } else if (ev.key === 'Escape') {
+            ev.target.value = e.tags.join('、');
+            S.ui.kbReturn = b.id;
+            ev.target.blur();
+            f.cur = b.id;
+            render();
+          }
+        },
+      });
+      return h('tr', { class: [o ? 'modified' : '', f.cur === b.id ? 'cur' : ''].join(' '), 'data-row': b.id, onclick: (ev) => {
+        if (f.cur === b.id) return;
+        const prev = document.querySelector('tr.cur');
+        if (prev) prev.classList.remove('cur');
+        ev.currentTarget.classList.add('cur');
+        f.cur = b.id;
+      } },
         h('td', {}, h('div', {}, b.id), h('div', { class: 'reason' }, posOf(b)), memBadge(b),
-          needsReview(b) ? h('div', {}, h('button', { class: 'btn small', title: '目前的分類與標籤正確，記入記憶', onclick: () => { remember([b]); render(); } }, '✓ 確認')) : null),
+          needsReview(b) ? h('div', {}, h('button', { class: 'btn small', title: '目前的分類與標籤正確，記入記憶（鍵盤：Enter）', onclick: () => { f.cur = b.id; remember([b]); render(); } }, '✓ 確認')) : null),
         h('td', {}, h('span', { class: 'badge' }, kindLabel(b))),
         h('td', {}, h('div', { class: 'clamp', title: '點一下展開／收合', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, blockText(b)), b.kind === 'figure' ? thumb(b) : null),
         h('td', {}, h('span', { class: 'badge cat cat-' + b.auto.cat }, b.auto.cat), ' ', b.auto.tags.map((t) => h('span', { class: 'badge tag' }, t)), h('div', { class: 'reason' }, b.auto.reason)),
         h('td', {}, h('select', { 'data-fk': b.id + ':cat', onchange: (ev) => setO({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
-        h('td', {}, h('input', { type: 'text', 'data-fk': b.id + ':tags', value: e.tags.join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐、地下1層' : '僅 C 類使用', title: e.cat === 'C' ? '新案必須具備全部標籤，這段才會保留' : '只有 C 條件式會用到標籤；此分類填了也不影響產出', style: { width: '200px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => setO({ tags: ev.target.value.split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean) }) }),
-          o ? h('div', {}, h('button', { class: 'btn small', onclick: () => { delete S.overrides[b.id]; remember([b]); save(); render(); } }, '還原自動判斷')) : null));
+        h('td', {}, tagInput,
+          unknown.map((t) => {
+            const sg = suggestTag(t, known);
+            return h('div', { class: 'tag-warn' }, `「${t}」不是已知標籤，產出時這段會被刪除。`,
+              sg ? h('button', { class: 'btn small', onclick: () => setO({ tags: e.tags.map((x) => (x === t ? sg : x)) }) }, `改為「${sg}」`) : null,
+              h('button', { class: 'btn small', onclick: () => { registerCustomTag(t); render(); } }, '登錄為自訂標籤'));
+          }),
+          e.cat === 'C' && !e.tags.length ? h('div', { class: 'tag-hint' }, 'C 類沒有標籤：產出時一律保留') : null,
+          o ? h('div', {}, h('button', { class: 'btn small', onclick: () => { delete S.overrides[b.id]; f.cur = b.id; commitEdits([b]); } }, '還原自動判斷')) : null));
     });
     wrap.appendChild(h('div', { class: 'card' },
-      h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' }, h('thead', {}, h('tr', {}, ['區塊', '類型', '內容', '自動判斷', '確認分類', '確認標籤'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))),
+      bulkBar,
+      h('div', { class: 'kbd-help' }, '鍵盤：', h('kbd', {}, '↑'), h('kbd', {}, '↓'), ' 選列　', h('kbd', {}, 'F'), h('kbd', {}, 'T'), h('kbd', {}, 'C'), h('kbd', {}, 'M'), ' 設定分類（C 沒有標籤時自動進入標籤欄）　', h('kbd', {}, 'Enter'), ' 確認並跳下一列　', h('kbd', {}, 'E'), ' 編輯標籤　', h('kbd', {}, 'Esc'), ' 離開輸入欄'),
+      h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' },
+        h('thead', { class: 'sticky' }, h('tr', {}, ['區塊', '類型', '內容', '自動判斷', '確認分類', '確認標籤'].map((x) => h('th', {}, x))), filterRow),
+        h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '沒有符合篩選條件的項目'))))),
       pager(f, pages, list.length)));
     return wrap;
+  }
+
+  /* ---------- 鍵盤快速分類 ---------- */
+  function classifyKey(ev) {
+    if (S.view !== 'classify' || !S.master || $('#busy').hidden === false) return;
+    const ae = document.activeElement;
+    const tag = ae && ae.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    const f = S.ui.cls;
+    const ids = S.ui.clsPageIds || [];
+    if (!ids.length) return;
+    let i = ids.indexOf(f.cur);
+    const byId = (id) => S.master.blocks.find((b) => b.id === id);
+    const move = (d) => {
+      if (i < 0) i = d > 0 ? -1 : ids.length;
+      const j = i + d;
+      if (j >= ids.length) {
+        if (f.page < S.ui.clsPages - 1) {
+          f.page++;
+          f.cur = null;
+          f.curAt = 'first';
+        } else f.cur = ids[ids.length - 1];
+      } else if (j < 0) {
+        if (f.page > 0) {
+          f.page--;
+          f.cur = null;
+          f.curAt = 'last';
+        } else f.cur = ids[0];
+      } else f.cur = ids[j];
+      S.ui.kbScroll = true;
+      render();
+    };
+    const key = ev.key;
+    const up = key.length === 1 ? key.toUpperCase() : key;
+    if (key === 'ArrowDown' || key === 'j') {
+      ev.preventDefault();
+      move(1);
+    } else if (key === 'ArrowUp' || key === 'k') {
+      ev.preventDefault();
+      move(-1);
+    } else if (['F', 'T', 'C', 'M'].includes(up)) {
+      if (i < 0) return;
+      ev.preventDefault();
+      const b = byId(f.cur);
+      setOverride(b, { cat: up });
+      S.ui.kbScroll = true;
+      if (up === 'C' && !K.effective(b, S.overrides).tags.length) S.ui.kbFocusTags = b.id;
+      commitEdits([b]);
+    } else if (key === 'Enter') {
+      if (i < 0) return;
+      ev.preventDefault();
+      remember([byId(f.cur)]);
+      move(1);
+    } else if (up === 'E') {
+      if (i < 0) return;
+      ev.preventDefault();
+      const el = document.querySelector(`[data-fk="${CSS.escape(f.cur + ':tags')}"]`);
+      if (el) el.focus();
+    }
+  }
+  document.addEventListener('keydown', classifyKey);
+  /* 鍵盤操作後：目前列捲入可視範圍、或進入標籤欄 */
+  function afterRenderKeyboard() {
+    if (S.view !== 'classify') return;
+    const f = S.ui.cls;
+    if (S.ui.kbFocusTags) {
+      const el = document.querySelector(`[data-fk="${CSS.escape(S.ui.kbFocusTags + ':tags')}"]`);
+      S.ui.kbFocusTags = null;
+      if (el) el.focus();
+    } else if (S.ui.kbReturn) {
+      S.ui.kbReturn = null;
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    }
+    if (S.ui.kbScroll && f.cur) {
+      S.ui.kbScroll = false;
+      const row = document.querySelector(`tr[data-row="${CSS.escape(f.cur)}"]`);
+      if (row) row.scrollIntoView({ block: 'nearest' });
+    }
   }
   function memBadge(b) {
     const m = b.mem;
@@ -719,7 +962,7 @@
     return h('tr', {}, cells);
   }
   function tagPanel(ti) {
-    const all = new Set(Object.values(RG.TAG_GROUPS).flat());
+    const all = new Set([...Object.values(RG.TAG_GROUPS).flat(), ...(S.rules.customTags || [])]);
     if (S.master) S.master.blocks.forEach((b) => K.effective(b, S.overrides).tags.forEach((t) => all.add(t)));
     ti.derived.tags.forEach((t) => all.add(t));
     const grouped = Object.assign({}, RG.TAG_GROUPS);
@@ -859,9 +1102,10 @@
   /* ====================================================================
    * 4. 工項規劃
    * ==================================================================== */
+  const PLAN_FILTER_KEYS = ['chapter', 'kind', 'q', 'tagF', 'result', 'decision'];
   function viewPlan() {
     const wrap = h('div', {}, h('h1', { class: 'view-title' }, '4 工項規劃'),
-      h('p', { class: 'view-desc' }, '依專案的條件標籤，決定每個條件式內容（工項、子表格、評選表、風險條目）要保留或刪除。表名、「分項工程」標題會跟著所屬表格一起處理。可以逐筆改成「保留」或「刪除」。'));
+      h('p', { class: 'view-desc' }, '依專案的條件標籤，決定每個條件式內容（工項、子表格、評選表、風險條目、圖片）要保留或刪除。表名、「分項工程」標題會跟著所屬表格一起處理。用表頭篩選找出同性質的項目，可以逐筆或一起指定「保留」「刪除」。'));
     if (!S.master) return wrap.appendChild(needMaster()), wrap;
     const res = planRes();
     const f = S.ui.plan;
@@ -870,28 +1114,77 @@
       const e = K.effective(b, S.overrides);
       return (e.cat === 'C' && e.tags.length) || b.kind === 'rows' || b.kind === 'figure' || !res[b.id].include || S.planOverrides[b.id];
     });
-    const q = f.q.trim();
+    const q = (f.q || '').trim();
     const list = relevant.filter((b) => {
       const r = res[b.id];
-      if (f.filter === 'keep' && !r.include) return false;
-      if (f.filter === 'drop' && r.include) return false;
-      if (f.filter === 'user' && !S.planOverrides[b.id]) return false;
-      if (q && !(b.text.includes(q) || ('表' + (b.capNo || '')) === q)) return false;
+      const e = K.effective(b, S.overrides);
+      if (f.chapter && b.chapter !== f.chapter) return false;
+      if (f.kind && (f.kind === 'imgtable' ? !(b.kind === 'figure' && b.capType === '表') : b.kind !== f.kind)) return false;
+      if (f.result === 'keep' && !r.include) return false;
+      if (f.result === 'drop' && r.include) return false;
+      if (f.decision === 'auto' && S.planOverrides[b.id]) return false;
+      if (f.decision === 'user' && !S.planOverrides[b.id]) return false;
+      if (['keep', 'drop'].includes(f.decision) && S.planOverrides[b.id] !== f.decision) return false;
+      if (f.tagF === '(missing)' && !e.tags.some((t) => !ti.set.has(t))) return false;
+      if (f.tagF === '(none)' && e.tags.length) return false;
+      if (f.tagF && !f.tagF.startsWith('(') && !e.tags.includes(f.tagF)) return false;
+      if (q && !(b.text.includes(q) || blockText(b).includes(q) || ((b.capType || '表') + (b.capNo || '')) === q)) return false;
       return true;
     });
     const nDrop = S.master.blocks.filter((b) => !res[b.id].include && !['empty', 'other'].includes(b.kind)).length;
     const pages = Math.max(1, Math.ceil(list.length / PAGE));
     f.page = Math.min(f.page, pages - 1);
+    const upd = (k, v) => {
+      f[k] = v;
+      f.page = 0;
+      render();
+    };
+    const fsel = (k, opts) => h('select', { 'data-filter': k, class: f[k] ? 'filter-on' : '', style: { width: '100%' }, onchange: (e) => upd(k, e.target.value) }, opts.map(([v, l]) => h('option', { value: v, selected: (f[k] || '') === v }, l)));
+    const chapters = [...new Set(relevant.map((b) => b.chapter))];
+    const usedTags = [...new Set(relevant.flatMap((b) => K.effective(b, S.overrides).tags))].sort();
+    const anyFilter = PLAN_FILTER_KEYS.some((k) => f[k]);
+
     wrap.appendChild(h('div', { class: 'card' },
       h('div', { class: 'row' }, h('b', {}, '目前條件標籤：'), [...ti.set].map((t) => h('span', { class: 'badge tag' }, t)), h('button', { class: 'btn small', onclick: () => go('project') }, '修改')),
       h('div', { class: 'row', style: { marginTop: '10px' } },
         h('span', { class: 'badge keep' }, `條件式內容 ${relevant.length} 筆`), h('span', { class: 'badge drop' }, `將刪除 ${nDrop} 個區塊`), h('span', { class: 'badge user' }, `使用者指定 ${Object.keys(S.planOverrides).length} 筆`)),
       h('div', { class: 'row', style: { marginTop: '10px' } },
-        h('select', { onchange: (e) => { f.filter = e.target.value; f.page = 0; render(); } }, [['all', '全部'], ['keep', '只看保留'], ['drop', '只看刪除'], ['user', '只看使用者指定']].map(([v, l]) => h('option', { value: v, selected: f.filter === v }, l))),
-        h('input', { type: 'search', placeholder: '搜尋內容或表號', value: f.q, onchange: (e) => { f.q = e.target.value; f.page = 0; render(); } }),
         h('button', { class: 'btn', onclick: exportPlan }, '匯出工項規劃表 .xlsx'),
         pickBtn('匯入工項規劃表', '.xlsx', importPlan),
-        Object.keys(S.planOverrides).length ? h('button', { class: 'btn ghost', onclick: () => { S.planOverrides = {}; invalidateOutputs(); save(); render(); } }, '清除所有指定') : null)));
+        Object.keys(S.planOverrides).length ? h('button', { class: 'btn ghost', onclick: () => { if (!confirm('清除所有「保留／刪除」指定，全部改回自動判定？')) return; S.planOverrides = {}; invalidateOutputs(); save(); render(); } }, '清除所有指定') : null,
+        anyFilter ? h('button', { class: 'btn small', onclick: () => { PLAN_FILTER_KEYS.forEach((k) => (f[k] = '')); f.page = 0; render(); } }, '清除所有篩選') : null,
+        h('span', { class: 'muted' }, anyFilter ? `篩選結果 ${list.length} 筆` : `共 ${list.length} 筆`))));
+
+    const setDecision = (blocks, v) => {
+      for (const b of blocks) {
+        if (v) S.planOverrides[b.id] = v;
+        else delete S.planOverrides[b.id];
+      }
+      const mem = blocks.filter((b) => RG.mem.memorable(b));
+      if (mem.length) remember(mem);
+      invalidateOutputs();
+      save();
+      render();
+    };
+    const bulk = (v, label) => {
+      if (!list.length) return;
+      if (list.length > 1 && !confirm(`將篩選結果 ${list.length} 筆設為「${label}」？`)) return;
+      setDecision(list, v);
+      toast(`已將 ${list.length} 筆設為「${label}」`, 'ok');
+    };
+    const bulkBar = h('div', { class: 'bulkbar' }, h('b', {}, `對篩選結果 ${list.length} 筆：`),
+      h('button', { class: 'btn small', onclick: () => bulk('keep', '保留') }, '全部保留'),
+      h('button', { class: 'btn small', onclick: () => bulk('drop', '刪除') }, '全部刪除'),
+      h('button', { class: 'btn small', onclick: () => bulk('', '自動') }, '全部改回自動'));
+
+    const filterRow = h('tr', { class: 'filters' },
+      h('th', {}, fsel('chapter', [['', '全部章節'], ...chapters.map((c) => [c, c])])),
+      h('th', {}, fsel('kind', [['', '全部'], ['p', '段落'], ['table', '表格'], ['rows', '子表格'], ['figure', '圖'], ['imgtable', '表格截圖']])),
+      h('th', {}, h('input', { type: 'search', 'data-filter': 'q', class: f.q ? 'filter-on' : '', placeholder: '搜尋內容或表號', value: f.q || '', style: { width: '100%' }, onchange: (e) => upd('q', e.target.value) })),
+      h('th', {}, fsel('tagF', [['', '全部'], ['(missing)', '（含新案沒有的標籤）'], ['(none)', '（沒有標籤）'], ...usedTags.map((t) => [t, t])])),
+      h('th', {}, fsel('result', [['', '全部'], ['keep', '保留'], ['drop', '刪除']])),
+      h('th', {}, fsel('decision', [['', '全部'], ['auto', '自動'], ['user', '使用者指定'], ['keep', '指定保留'], ['drop', '指定刪除']])));
+
     const rows = list.slice(f.page * PAGE, (f.page + 1) * PAGE).map((b) => {
       const r = res[b.id];
       const e = K.effective(b, S.overrides);
@@ -901,12 +1194,16 @@
         h('td', {}, h('span', { class: 'badge' }, kindLabel(b))),
         h('td', {}, h('div', { class: 'clamp', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, blockText(b)), b.kind === 'figure' ? thumb(b) : null,
           b.kind === 'figure' && r.include ? h('div', { class: 'reason' }, e.cat === 'F' && S.options.figurePlaceholder ? '產出時換成【待補圖】' : '產出時沿用原圖') : null),
-        h('td', {}, e.tags.map((t) => h('span', { class: 'badge tag', style: { opacity: ti.set.has(t) ? 1 : 0.55 } }, t))),
+        h('td', {}, e.tags.map((t) => h('span', { class: 'badge tag', title: ti.set.has(t) ? '新案有此條件' : '新案沒有此條件', style: { opacity: ti.set.has(t) ? 1 : 0.55 } }, t))),
         h('td', {}, h('span', { class: 'badge ' + (r.include ? 'keep' : 'drop') }, r.include ? '保留' : '刪除'), h('div', { class: 'reason' }, r.reason)),
-        h('td', {}, h('select', { 'data-fk': b.id + ':plan', onchange: (ev) => { if (ev.target.value) S.planOverrides[b.id] = ev.target.value; else delete S.planOverrides[b.id]; if (RG.mem.memorable(b)) remember([b]); invalidateOutputs(); save(); render(); } },
+        h('td', {}, h('select', { 'data-fk': b.id + ':plan', onchange: (ev) => setDecision([b], ev.target.value) },
           [['', '自動'], ['keep', '保留'], ['drop', '刪除']].map(([v, l]) => h('option', { value: v, selected: po === v }, l)))));
     });
-    wrap.appendChild(h('div', { class: 'card' }, h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' }, h('thead', {}, h('tr', {}, ['區塊', '類型', '內容', '條件標籤', '判定', '決定'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))), pager(f, pages, list.length)));
+    wrap.appendChild(h('div', { class: 'card' }, bulkBar,
+      h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' },
+        h('thead', { class: 'sticky' }, h('tr', {}, ['區塊', '類型', '內容', '條件標籤', '判定', '決定'].map((x) => h('th', {}, x))), filterRow),
+        h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '沒有符合篩選條件的項目'))))),
+      pager(f, pages, list.length)));
     return wrap;
   }
   function exportPlan() {
@@ -1422,6 +1719,7 @@
       h('p', { class: 'view-desc' }, '以下規則對應規劃書中的 rules/*.yaml，以 JSON 格式編輯。修改後按「儲存」，會套用到分類初判、產出與檢查。「關鍵字」與「match」欄位是正規表示式。'));
     wrap.appendChild(keywordCard());
     const items = [
+      ['customTags', '自訂條件標籤', '格式：["鷹架", "滯留設施"]。在分類頁「登錄為自訂標籤」會加到這裡；登錄後不會再被當成打錯字。新案要保留這類內容，請到「3 專案資料」最下方啟用'],
       ['tagKeywords', '條件標籤關鍵字（建庫初判用）', '格式：{"標籤": ["關鍵字1", "關鍵字2"]}'],
       ['tagRules', '專案事實 → 條件標籤 推導規則（tag_rules）', '格式：[{"field": "欄位", "match": "正規表示式", "tags": ["標籤"]}]；always: true 表示一律加入'],
       ['knownFixes', '自動更正清單（known_fixes）', '格式：[{"find": "正規表示式", "replace": "更正後", "note": "說明"}]'],
