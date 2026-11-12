@@ -184,6 +184,117 @@
     return res;
   };
 
+  /* ---------- 關鍵字建議：從記憶庫（使用者確認過的分類與標籤）歸納 ----------
+   * 對每個標籤：
+   *  add    你標了這個標籤、但目前關鍵字抓不到的段落中，常共同出現、且很少出現在其他段落的詞
+   *  remove 目前的關鍵字中，抓到的段落大多被你拿掉這個標籤者 */
+  const BAD_TERM = /[\d\p{P}\p{S}\s]/u;
+  /* 以虛詞開頭或結尾的詞不建議（例如「應由」「設置之」） */
+  const FUNC_EDGE = /^[應之由及與並於的或等為以其時後前內上下中而且則需須將把被對向在有是]|[應之由及與並於的或等為以其而且則需須將把被對向在是]$/;
+  K.suggestKeywords = function (memory, rules, lits, opts = {}) {
+    const minPrecision = opts.minPrecision || 0.6;
+    const maxAdd = opts.maxAdd || 5;
+    const strip = (s) => {
+      let t = s;
+      for (const l of lits || []) {
+        const n = String(l).normalize('NFKC').replace(/\s+/g, '');
+        if (n) t = t.split(n).join('｜');
+      }
+      return t;
+    };
+    const entries = Object.values((memory && memory.entries) || {})
+      .filter((e) => !e.conflict && e.nh)
+      .map((e) => ({ e, t: strip(e.nh), tags: new Set(e.tags || []) }));
+    if (!entries.length) return [];
+    const allTags = new Set();
+    entries.forEach((x) => x.tags.forEach((t) => allTags.add(t)));
+    Object.keys(rules.tagKeywords || {}).forEach((t) => allTags.add(t));
+    const out = [];
+    for (const tag of allTags) {
+      const kws = (rules.tagKeywords || {})[tag] || [];
+      const re = kws.length ? safeRe(kws.join('|')) : null;
+      const pos = entries.filter((x) => x.tags.has(tag));
+      const neg = entries.filter((x) => !x.tags.has(tag));
+      const missed = pos.filter((x) => !(re && re.test(x.t)));
+      const res = { tag, pos: pos.length, missed: missed.length, add: [], remove: [] };
+
+      // 建議加入
+      if (missed.length) {
+        const minDf = missed.length === 1 ? 1 : 2;
+        const df = new Map();
+        missed.forEach((x, i) => {
+          const seen = new Set();
+          for (let L = 2; L <= 6; L++) {
+            for (let k = 0; k + L <= x.t.length; k++) {
+              const g = x.t.substr(k, L);
+              if (seen.has(g) || BAD_TERM.test(g) || FUNC_EDGE.test(g)) continue;
+              seen.add(g);
+              df.set(g, (df.get(g) || 0) + 1);
+            }
+          }
+        });
+        const cands = [...df.entries()].filter(([, n]) => n >= minDf).sort((a, b) => b[1] - a[1] || b[0].length - a[0].length).slice(0, 400);
+        const scored = [];
+        for (const [term] of cands) {
+          const cov = new Set();
+          missed.forEach((x, i) => x.t.includes(term) && cov.add(i));
+          const fp = neg.filter((x) => x.t.includes(term));
+          const tp = pos.filter((x) => x.t.includes(term)).length;
+          const precision = tp / (tp + fp.length);
+          if (precision < minPrecision) continue;
+          scored.push({ term, cov, fp: fp.length, tp, precision, fpEx: fp.slice(0, 3).map((x) => x.e.pv) });
+        }
+        // 涵蓋相同段落、誤抓數相同的詞只留一個（長度最接近 4 字，平手取較長）
+        const groups = new Map();
+        for (const s of scored) {
+          const key = [...s.cov].join(',') + '|' + s.fp;
+          const cur = groups.get(key);
+          const d = (t) => Math.abs(t.length - 4);
+          if (!cur || d(s.term) < d(cur.term) || (d(s.term) === d(cur.term) && s.term.length > cur.term.length)) groups.set(key, s);
+        }
+        // 貪婪選擇：每次挑能多抓最多段落者
+        const pool = [...groups.values()];
+        const covered = new Set();
+        while (res.add.length < maxAdd) {
+          let best = null;
+          let bestGain = 0;
+          for (const s of pool) {
+            let g = 0;
+            s.cov.forEach((i) => !covered.has(i) && g++);
+            if (g > bestGain || (g === bestGain && best && s.fp < best.fp)) {
+              best = s;
+              bestGain = g;
+            }
+          }
+          if (!best || !bestGain) break;
+          best.cov.forEach((i) => covered.add(i));
+          res.add.push({
+            term: best.term,
+            gain: bestGain,
+            fp: best.fp,
+            examples: missed.filter((x, i) => best.cov.has(i)).slice(0, 3).map((x) => x.e.pv),
+            fpExamples: best.fpEx,
+          });
+          pool.splice(pool.indexOf(best), 1);
+        }
+      }
+
+      // 建議移除：關鍵字抓到的段落中，被你拿掉此標籤的比例過高
+      for (const kw of kws) {
+        const r = safeRe(kw);
+        if (!r) continue;
+        // 誤判只計「確認為 C 但沒有此標籤」的段落（T 類可能是法規、案例等本來就不判條件的章節）
+        const hit = entries.filter((x) => r.test(x.t) && (x.tags.has(tag) || x.e.cat === 'C'));
+        if (hit.length < 2) continue;
+        const wrong = hit.filter((x) => !x.tags.has(tag));
+        const tp = hit.length - wrong.length;
+        if (wrong.length >= 2 && wrong.length > tp) res.remove.push({ kw, tp, fp: wrong.length, examples: wrong.slice(0, 3).map((x) => x.e.pv) });
+      }
+      if (res.add.length || res.remove.length) out.push(res);
+    }
+    return out.sort((a, b) => b.missed - a.missed);
+  };
+
   /* ---------- 風險矩陣（第 3.4 節） ---------- */
   K.riskLevel = (v) => (v >= 6 ? 'H' : v >= 3 ? 'M' : 'L');
   const int13 = (s) => {

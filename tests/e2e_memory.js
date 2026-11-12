@@ -93,7 +93,29 @@ const ok = (cond, msg) => {
   const intro1 = await find('本案為臺中市');
   ok(intro1.cat === 'T' && r.fresh === 0, `切回第一版仍正確沿用（推定 ${r.fuzzy}、新段落 ${r.fresh}）`);
 
-  // 6. 清除記憶庫
+  // 6. 關鍵字建議：在規則設定頁分析、加入，已確認段落不受影響
+  const before = await page.evaluate(() => RG.app.S.master.blocks.filter((b) => RG.mem.memorable(b)).map((b) => b.id + ':' + JSON.stringify(RG.kb.effective(b, RG.app.S.overrides))));
+  await page.evaluate(() => RG.app.go('rules'));
+  await page.click('button:has-text("分析記憶庫")');
+  const sugg = await page.evaluate(() => RG.app.S.kwSuggest.map((r) => ({ tag: r.tag, add: r.add.map((a) => a.term), remove: r.remove.map((m) => m.kw) })));
+  console.log('suggest', JSON.stringify(sugg));
+  ok(Array.isArray(sugg), '規則設定頁可以分析記憶庫');
+  await page.screenshot({ path: path.join(process.env.OUT_DIR || path.join(__dirname, 'out'), 'keyword-suggest.png'), fullPage: false }).catch(() => {});
+  const addBtn = await page.$('button.primary:has-text("加入")');
+  if (addBtn) {
+    const kwBefore = await page.evaluate(() => JSON.stringify(RG.app.S.rules.tagKeywords));
+    await addBtn.click();
+    const kwAfter = await page.evaluate(() => JSON.stringify(RG.app.S.rules.tagKeywords));
+    ok(kwBefore !== kwAfter, '按「加入」後關鍵字已更新');
+    await page.waitForSelector('.badge.keep:has-text("已加入")');
+  }
+  // 讓所有段落的自動判斷大改：把「電梯」關鍵字改成會抓到一般字的詞，再重新初判
+  await page.evaluate(() => { RG.app.S.rules.tagKeywords['電梯'] = ['作業', '設置']; RG.app.go('classify'); });
+  await page.click('button:has-text("重新初判")');
+  const after = await page.evaluate(() => RG.app.S.master.blocks.filter((b) => RG.mem.memorable(b)).map((b) => b.id + ':' + JSON.stringify(RG.kb.effective(b, RG.app.S.overrides))));
+  ok(JSON.stringify(before) === JSON.stringify(after), '關鍵字改變後重新初判，已確認的段落維持原確認結果');
+
+  // 7. 清除記憶庫
   page.once('dialog', (d) => d.accept());
   await page.evaluate(() => RG.app.go('classify'));
   await page.click('button:has-text("清除記憶庫")');

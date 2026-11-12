@@ -9,7 +9,9 @@
   M.HEAD = 600; // 模糊比對只用正規化後前 600 字
   M.empty = () => ({ version: 1, threshold: 0.9, entries: {} });
 
-  M.norm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, '');
+  /* 換行（表格的列、段內換行）保留為「|」分隔，其餘空白移除；避免前一列結尾與下一列開頭黏成一個詞 */
+  M.norm = (s) => String(s || '').normalize('NFKC').replace(/\s*\n\s*/g, '|').replace(/\s+/g, '');
+  const legacyNorm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, '');
   /* cyrb53：快速字串雜湊 */
   M.hash = function (str, seed = 0) {
     let h1 = 0xdeadbeef ^ seed,
@@ -30,6 +32,8 @@
     const n = M.norm(textOf(b));
     b._memNorm = n;
     b._memKey = b.kind + ':' + M.hash(n) + ':' + n.length;
+    const ln = legacyNorm(textOf(b));
+    b._memLegacyKey = ln === n ? null : b.kind + ':' + M.hash(ln) + ':' + ln.length;
     return b._memKey;
   };
 
@@ -116,7 +120,12 @@
     };
     for (const b of blocks) {
       if (!M.memorable(b)) continue;
-      const key = M.keyOf(b);
+      let key = M.keyOf(b);
+      // 相容先前版本（換行未保留）存下的記憶：改存到新的鍵
+      if (!entries[key] && b._memLegacyKey && entries[b._memLegacyKey]) {
+        entries[key] = Object.assign({}, entries[b._memLegacyKey], { nh: b._memNorm.slice(0, M.HEAD), len: b._memNorm.length });
+        delete entries[b._memLegacyKey];
+      }
       const ent = entries[key];
       if (ent && !ent.conflict) {
         put(b, ent);

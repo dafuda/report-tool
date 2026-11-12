@@ -19,6 +19,8 @@
     masterSig: '',
     memory: RG.mem.empty(),
     memResult: null,
+    kwSuggest: null,
+    kwDone: {},
     projectName: '新案A',
     caseFiles: [],
     suggestions: {},
@@ -425,6 +427,7 @@
       h('div', { class: 'row between' },
         h('h2', {}, '記憶庫 ', h('span', { class: 'muted' }, `${st.count} 筆（來自 ${st.masters} 份母本）${st.conflicts ? `・衝突 ${st.conflicts} 筆` : ''}`)),
         h('div', { class: 'row' },
+          h('button', { class: 'btn', title: '依記憶庫歸納條件標籤的關鍵字', onclick: () => { runKeywordSuggest(); go('rules'); } }, '關鍵字建議'),
           h('button', { class: 'btn', onclick: () => xlsxOrJson() }, '匯出記憶庫'),
           pickBtn('匯入記憶庫（合併）', '.json', importMemory),
           h('button', { class: 'btn ghost', onclick: () => {
@@ -505,10 +508,18 @@
       h('span', { class: 'muted' }, `第 ${f.page + 1} / ${pages} 頁，共 ${total} 筆`),
       h('button', { class: 'btn small', disabled: f.page >= pages - 1, onclick: () => { f.page++; render(); } }, '下一頁 ›'));
   }
-  function reclassify() {
+  /* 依目前規則重新初判，再用記憶庫還原你確認過的結果（避免自動結果改變時，已確認的段落跟著變） */
+  function reclassifyKeepMemory() {
+    if (!S.master) return;
     K.classify(S.master.blocks, S.rules, S.facts);
+    const r = RG.mem.apply(S.memory, S.master.blocks, { overrides: S.overrides, planOverrides: S.planOverrides, sig: S.masterSig, keepExisting: false });
+    S.memResult = Object.assign(r, { name: S.master.name, prevName: '', sameMaster: true });
     invalidateOutputs();
-    toast('已依目前規則重新初判', 'ok');
+    save();
+  }
+  function reclassify() {
+    reclassifyKeepMemory();
+    toast('已依目前規則重新初判（已確認的段落維持你的確認結果）', 'ok');
     render();
   }
   function exportClassify() {
@@ -996,9 +1007,86 @@
   /* ====================================================================
    * 規則設定
    * ==================================================================== */
+  function factLiterals() {
+    const out = [];
+    for (const f of Object.values(S.facts)) out.push(...RG.literalsOf(f));
+    return out;
+  }
+  function runKeywordSuggest() {
+    S.kwSuggest = K.suggestKeywords(S.memory, S.rules, factLiterals());
+    S.kwDone = {};
+  }
+  const escRe2 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  function applyKeyword(kind, tag, value) {
+    const list = (S.rules.tagKeywords[tag] = (S.rules.tagKeywords[tag] || []).slice());
+    if (kind === 'add') {
+      const kw = escRe2(value);
+      if (!list.includes(kw)) list.push(kw);
+    } else {
+      S.rules.tagKeywords[tag] = list.filter((k) => k !== value);
+      if (!S.rules.tagKeywords[tag].length) delete S.rules.tagKeywords[tag];
+    }
+    S.kwDone[kind + '|' + tag + '|' + value] = kind === 'add' ? '已加入' : '已移除';
+  }
+  function afterKeywordChange(msg) {
+    save();
+    reclassifyKeepMemory();
+    toast(msg + (S.master ? '；目前母本已重新初判，已確認的段落不受影響' : ''), 'ok');
+    render();
+  }
+  function keywordCard() {
+    const st = RG.mem.stats(S.memory);
+    const card = h('div', { class: 'card' },
+      h('div', { class: 'row between' },
+        h('h2', {}, '關鍵字建議 ', h('span', { class: 'muted' }, `依記憶庫 ${st.count} 筆確認結果歸納`)),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', disabled: !st.count, onclick: () => { runKeywordSuggest(); render(); } }, S.kwSuggest ? '重新分析' : '分析記憶庫'),
+          S.kwSuggest && S.kwSuggest.length ? h('button', { class: 'btn', onclick: () => {
+            let n = 0;
+            for (const r of S.kwSuggest) {
+              for (const a of r.add) if (!S.kwDone['add|' + r.tag + '|' + a.term]) { applyKeyword('add', r.tag, a.term); n++; }
+              for (const m of r.remove) if (!S.kwDone['remove|' + r.tag + '|' + m.kw]) { applyKeyword('remove', r.tag, m.kw); n++; }
+            }
+            afterKeywordChange(`已套用 ${n} 項建議`);
+          } }, '全部採用') : null)),
+      h('div', { class: 'muted' }, '工具會找出「你標了某個條件標籤、但目前關鍵字抓不到」的段落，歸納它們共同出現、又很少出現在其他段落的詞，建議加入該標籤的關鍵字；也會找出常誤判的關鍵字，建議移除。建議只有在你按「加入」或「移除」後才會生效。記憶庫越多、確認得越完整，建議越準。'));
+    if (!st.count) card.appendChild(h('div', { class: 'note', style: { marginTop: '10px' } }, '記憶庫還是空的。請先在「2 分類與標籤確認」確認或修改分類與標籤。'));
+    if (!S.kwSuggest) return card;
+    if (!S.kwSuggest.length) {
+      card.appendChild(h('div', { class: 'note ok', style: { marginTop: '10px' } }, '目前沒有建議：你標過的條件標籤，現有關鍵字都抓得到，也沒有常誤判的關鍵字。'));
+      return card;
+    }
+    const doneBadge = (k) => (S.kwDone[k] ? h('span', { class: 'badge keep' }, S.kwDone[k]) : null);
+    for (const r of S.kwSuggest) {
+      const box = h('div', { style: { borderTop: '1px solid var(--line)', paddingTop: '10px', marginTop: '10px' } },
+        h('div', {}, h('span', { class: 'badge tag' }, r.tag), ' ',
+          h('span', { class: 'muted' }, `你標了 ${r.pos} 筆` + (r.missed ? `，其中 ${r.missed} 筆目前的關鍵字抓不到` : '') + `。目前關鍵字：${((S.rules.tagKeywords || {})[r.tag] || []).join('、') || '（無）'}`)));
+      for (const a of r.add) {
+        const k = 'add|' + r.tag + '|' + a.term;
+        box.appendChild(h('div', { class: 'row', style: { marginTop: '6px' } },
+          h('span', {}, '建議加入 ', h('b', {}, `「${a.term}」`)),
+          h('span', { class: 'muted' }, `可多抓 ${a.gain} 筆` + (a.fp ? `，但會誤抓 ${a.fp} 筆沒有此標籤的段落` : '，不會誤抓')),
+          h('span', { class: 'muted', title: '會多抓到的段落：\n' + a.examples.join('\n') + (a.fpExamples.length ? '\n\n可能誤抓：\n' + a.fpExamples.join('\n') : ''), style: { textDecoration: 'underline dotted', cursor: 'help' } }, '例子'),
+          S.kwDone[k] ? doneBadge(k) : h('button', { class: 'btn small primary', onclick: () => { applyKeyword('add', r.tag, a.term); afterKeywordChange(`已把「${a.term}」加入「${r.tag}」的關鍵字`); } }, '加入'),
+          S.kwDone[k] ? null : h('button', { class: 'btn small', onclick: () => { S.kwDone[k] = '已略過'; render(); } }, '略過')));
+      }
+      for (const m of r.remove) {
+        const k = 'remove|' + r.tag + '|' + m.kw;
+        box.appendChild(h('div', { class: 'row', style: { marginTop: '6px' } },
+          h('span', {}, '建議移除 ', h('b', {}, `「${m.kw}」`)),
+          h('span', { class: 'muted' }, `它抓到的 ${m.tp + m.fp} 筆 C 類段落中，有 ${m.fp} 筆你沒有標「${r.tag}」`),
+          h('span', { class: 'muted', title: '誤判的段落：\n' + m.examples.join('\n'), style: { textDecoration: 'underline dotted', cursor: 'help' } }, '例子'),
+          S.kwDone[k] ? doneBadge(k) : h('button', { class: 'btn small danger', onclick: () => { applyKeyword('remove', r.tag, m.kw); afterKeywordChange(`已從「${r.tag}」移除關鍵字「${m.kw}」`); } }, '移除'),
+          S.kwDone[k] ? null : h('button', { class: 'btn small', onclick: () => { S.kwDone[k] = '已略過'; render(); } }, '略過')));
+      }
+      card.appendChild(box);
+    }
+    return card;
+  }
   function viewRules() {
     const wrap = h('div', {}, h('h1', { class: 'view-title' }, '規則設定'),
       h('p', { class: 'view-desc' }, '以下規則對應規劃書中的 rules/*.yaml，以 JSON 格式編輯。修改後按「儲存」，會套用到分類初判、產出與檢查。「關鍵字」與「match」欄位是正規表示式。'));
+    wrap.appendChild(keywordCard());
     const items = [
       ['tagKeywords', '條件標籤關鍵字（建庫初判用）', '格式：{"標籤": ["關鍵字1", "關鍵字2"]}'],
       ['tagRules', '專案事實 → 條件標籤 推導規則（tag_rules）', '格式：[{"field": "欄位", "match": "正規表示式", "tags": ["標籤"]}]；always: true 表示一律加入'],
@@ -1022,7 +1110,7 @@
               S.rules[key] = isStr ? ta.value.trim() : JSON.parse(ta.value);
               save();
               invalidateOutputs();
-              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions'].includes(key)) K.classify(S.master.blocks, S.rules, S.facts);
+              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions'].includes(key)) reclassifyKeepMemory();
               toast('已儲存：' + title, 'ok');
             } catch (e) {
               toast('JSON 格式錯誤：' + e.message, 'bad');
@@ -1110,6 +1198,6 @@
     render();
   });
 
-  window.RG.app = { S, render, go, loadMaster, remember };
+  window.RG.app = { S, render, go, loadMaster, remember, runKeywordSuggest };
   render();
 })();
