@@ -54,11 +54,35 @@
     const byId = Object.fromEntries(blocks.map((b) => [b.id, b]));
     const captionText = (b) => (b.captionId && byId[b.captionId] ? byId[b.captionId].text : '');
 
+    const figFact = safeRe(rules.figureFactCaptions || '(?!)');
+    const figTpl = safeRe(rules.figureTemplateCaptions || '(?!)');
     for (const b of blocks) {
       let cat = 'T';
       let tags = [];
       let reason = '';
-      if (['heading', 'caption', 'toc', 'empty', 'other', 'figure'].includes(b.kind)) {
+      if (b.kind === 'figure') {
+        // 圖片（含以截圖呈現的表格）：依圖名／表名判斷
+        const name = b.capName || '';
+        let nm = name;
+        for (const l of lits) nm = nm.split(l).join(' ');
+        const what = b.capType === '表' ? '表格截圖' : '圖';
+        if (name && figFact && figFact.test(name)) {
+          cat = 'F';
+          reason = `${what}名含專案相關字詞，視為專案圖（產出時換成待補圖）`;
+        } else if (name && b.chapter !== '前置' && (tags = kw.filter((k) => k.re.test(nm)).map((k) => k.tag)).length) {
+          cat = 'C';
+          reason = `${what}名出現條件關鍵字`;
+        } else if (name && figTpl && figTpl.test(name)) {
+          cat = 'T';
+          reason = `${what}名為流程、架構、示意等通用圖`;
+        } else {
+          cat = 'F';
+          reason = name ? `無法從${what}名判斷，預設視為專案圖；若為通用圖請改 T` : `沒有${what}名，預設視為專案圖；若為通用圖請改 T`;
+        }
+        b.auto = { cat, tags, reason };
+        continue;
+      }
+      if (['heading', 'caption', 'toc', 'empty', 'other'].includes(b.kind)) {
         reason = '結構元素（標題／表名／目錄等）';
       } else {
         let tagText = b.text;

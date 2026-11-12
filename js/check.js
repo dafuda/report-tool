@@ -23,7 +23,7 @@
   /* 可檢查的文字單位：段落、表格儲存格 */
   const units = function* (blocks) {
     for (const b of blocks) {
-      if (b.parentId || ['empty', 'other', 'toc', 'figure'].includes(b.kind)) continue;
+      if (b.parentId || ['empty', 'other', 'toc'].includes(b.kind) || (b.kind === 'figure' && !b.placeholder)) continue;
       if (b.kind === 'table') {
         for (let ri = 0; ri < b.rows.length; ri++) for (let ci = 0; ci < b.rows[ri].length; ci++) yield { b, text: b.rows[ri][ci], where: `${loc(b)} 第${ri + 1}列第${ci + 1}欄` };
       } else yield { b, text: b.text, where: loc(b) };

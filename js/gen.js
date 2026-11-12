@@ -78,7 +78,7 @@
     };
   };
 
-  const TYPE_ORDER = ['待填', '待審', '新案資料填入', '自動更正', '母本疑義'];
+  const TYPE_ORDER = ['待填', '待補圖', '待審', '新案資料填入', '自動更正', '母本疑義'];
   const ZERO_RE = /^\s*(0|０|無|否|none)\s*$/i;
   const COUNT_UNIT_RE = /[層座部台臺輛棟戶間處支]/;
   const ORDINAL_RE = /^\s*[(（]?\d{1,3}[)）.、]?\s*$/;
@@ -126,13 +126,17 @@
     const allLits = [];
     for (const f of Object.values(ctx.facts)) allLits.push(...RG.literalsOf(f));
     const tagSet = ctx.tagSet || new Set();
-    const stats = { uncoveredF: 0, fTodo: 0, review: 0 };
+    const stats = { uncoveredF: 0, fTodo: 0, review: 0, figPlaceholder: 0, boxParas: 0, hfParas: 0 };
     const isCovered = (text) => match(text, true).some((m) => m.fact);
 
-    /* opts.wholeTodo=false：表格儲存格由外層逐格判斷，這裡不做整段待填 */
+    /* opts.wholeTodo=false：表格儲存格由外層逐格判斷，這裡不做整段待填
+     * opts.silent：圖形的相容版（mc:Fallback）副本，只做相同替換，不記差異、不加註解
+     * opts.noComments：頁首頁尾不能放 Word 註解 */
     const processParagraph = (b, p, cat, loc, opts = {}) => {
       const before = D.paraText(p);
       if (!before.trim()) return false;
+      if (opts.silent) opts = Object.assign({}, opts, { noComments: true });
+      const record = (...args) => !opts.silent && addDiff(...args);
       const all = match(before, cat !== 'T');
       const covered = all.some((m) => m.fact);
 
@@ -146,8 +150,8 @@
           const label = pm ? pm[2].trim() : '專案事實';
           const lead = before.slice(keepLen).match(/^\s*/)[0].length;
           D.replaceInParagraph(p, [{ start: keepLen + lead, end: before.length, repl: `【待填：${label}】`, mark: 'todo' }]);
-          stats.fTodo++;
-          addDiff(b, loc, '待填', '母本 ' + b.id, before, D.paraText(p), 'F 專案事實：找不到對應的新案欄位，整段改為待填（母本原文見左欄，不帶入新案）', true);
+          if (!opts.silent) stats.fTodo++;
+          record(b, loc, '待填', '母本 ' + b.id, before, D.paraText(p), 'F 專案事實：找不到對應的新案欄位，整段改為待填（母本原文見左欄，不帶入新案）', true);
           return true;
         }
       }
@@ -155,7 +159,7 @@
       const ms = all.filter((m) => !m.noop);
       if (ms.length) {
         D.replaceInParagraph(p, ms, (run, m) => {
-          if (m.comment) comments.add(run, m.comment);
+          if (m.comment && !opts.noComments) comments.add(run, m.comment);
         });
       }
       const after = ms.length ? D.paraText(p) : before;
@@ -163,17 +167,17 @@
       // M 混合：替換後句型可能需要改寫 → 待審
       const reasons = options.markReview && cat !== 'T' ? G.reviewReasons(cat, before, after, ms, { tagSet }, kw, allLits) : [];
       if (reasons.length) {
-        stats.review++;
+        if (!opts.silent) stats.review++;
         if (!options.clean) {
           const runs = D.runsOf(p).filter((r) => D.kid(r, 't'));
           runs.forEach((r) => D.markRun(r, 'review'));
-          if (runs.length) comments.add(runs[0], '待審：' + reasons.join('；'));
+          if (runs.length && !opts.noComments) comments.add(runs[0], '待審：' + reasons.join('；'));
         }
       }
       if (!ms.length && !reasons.length) return false;
 
       const types = [...new Set(ms.map((m) => m.type).concat(reasons.length ? ['待審'] : []))].sort((a, z) => TYPE_ORDER.indexOf(a) - TYPE_ORDER.indexOf(z));
-      addDiff(
+      record(
         b,
         loc,
         types[0],
@@ -226,12 +230,12 @@
       if (!r.include) {
         removeEls.push(el);
         if (b.kind === 'caption' && b.capType === '表') removedCapNos.add(b.capNo);
-        if (b.kind === 'table' && b.capNo) removedCapNos.add(b.capNo);
+        if ((b.kind === 'table' || (b.kind === 'figure' && b.capType === '表')) && b.capNo) removedCapNos.add(b.capNo);
         if (b.kind !== 'empty' && b.kind !== 'other') addDiff(b, where(b), '已刪除', '母本 ' + b.id, b.text, '', r.reason || '不適用', false);
         continue;
       }
       const cat = K.effective(b, overrides).cat;
-      if (el.localName === 'tbl') {
+      if (el.localName === 'tbl' && b.kind !== 'figure') {
         const groupOfRow = {};
         for (const g of b.groups || []) {
           const gb = byId[g.id];
@@ -270,16 +274,35 @@
               }
             }
             D.all(tc, 'p').forEach((p) => {
-              if (processParagraph(owner, p, rowCat, loc, { wholeTodo: false })) changed = true;
+              if (processParagraph(owner, p, rowCat, loc, { wholeTodo: false, silent: D.inFallback(p) })) changed = true;
             });
           });
         });
         if (!changed && !(b.groups || []).length) addDiff(b, where(b), '沿用母本', '母本 ' + b.id, b.text, b.text, '', false);
+      } else if (b.kind === 'figure') {
+        // 圖片（含表格截圖）：F 換成【待補圖】佔位框，其餘沿用原圖
+        const label = b.capNo ? `${b.capType || '圖'}${b.capNo} ${b.capName || ''}`.trim() : '未命名圖片';
+        const what = b.capType === '表' ? '表格截圖' : '圖片';
+        if (cat === 'F' && options.figurePlaceholder) {
+          const imgPs = (el.localName === 'p' ? [el] : D.all(el, 'p').filter((p) => !D.inFallback(p))).filter((p) => D.hasImage(p));
+          imgPs.forEach((p, i) => {
+            if (i === 0) D.makePlaceholder(p, `【待補圖：${label}】`);
+            else for (const r of D.runsOf(p)) if (D.hasImage(r)) r.parentNode.removeChild(r);
+          });
+          stats.figPlaceholder++;
+          addDiff(b, where(b), '待補圖', '母本 ' + b.id, `［${what}：${label}，${(b.images || []).length} 張］`, `【待補圖：${label}】`, `F 專案${what}：母本的${what}不沿用，請放入新案的${what}`, true);
+        } else {
+          addDiff(b, where(b), '沿用母本', '母本 ' + b.id, `［${what}：${label}］`, `［${what}：${label}］`, cat === 'C' ? '條件符合，沿用母本' + what : `${K.CATS[cat] || cat}，沿用母本${what}`, cat === 'F');
+        }
+        continue;
       } else {
-        const ps = el.localName === 'p' ? [el] : D.all(el, 'p');
+        // 段落本身＋其中文字方塊／圖形內的段落
+        const ps = el.localName === 'p' ? [el, ...D.all(el, 'p')] : D.all(el, 'p');
         let changed = false;
         ps.forEach((p) => {
-          if (processParagraph(b, p, cat, where(b))) changed = true;
+          const isBox = p !== el && el.localName === 'p';
+          if (isBox && !D.inFallback(p)) stats.boxParas++;
+          if (processParagraph(b, p, cat, isBox ? where(b) + '（文字方塊）' : where(b), { silent: D.inFallback(p) })) changed = true;
         });
         if (!changed && b.text.trim() && !['empty', 'other', 'toc'].includes(b.kind)) addDiff(b, where(b), '沿用母本', '母本 ' + b.id, b.text, b.text, '', false);
       }
@@ -346,6 +369,20 @@
       if (pPr && D.kid(pPr, 'sectPr')) {
         for (const c of Array.from(el.childNodes)) if (c !== pPr) el.removeChild(c);
       } else el.parentNode.removeChild(el);
+    }
+
+    // 頁首頁尾：替換專案事實、自動更正（不加 Word 註解）
+    for (const path of D.headerFooterParts(zip)) {
+      const hdoc = D.parseXml(await zip.file(path).async('string'));
+      const name = path.replace('word/', '');
+      const hb = { id: 'hf:' + name, chapter: '頁首頁尾', section: name.startsWith('header') ? '頁首' : '頁尾', kind: 'p' };
+      let touched = false;
+      for (const p of D.all(hdoc, 'p')) {
+        const silent = D.inFallback(p);
+        if (!silent && D.paraText(p).trim()) stats.hfParas++;
+        if (processParagraph(hb, p, 'F', `${hb.section}（${name}）`, { wholeTodo: false, noComments: true, silent })) touched = true;
+      }
+      if (touched) zip.file(path, D.serialize(hdoc));
     }
 
     zip.file('word/document.xml', D.serialize(doc));

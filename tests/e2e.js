@@ -23,19 +23,26 @@ const ok = (cond, msg) => {
   await page.goto('file://' + path.join(root, 'index.html'));
 
   // 1. 母本
-  await page.setInputFiles('.drop input[type=file]', sample);
+  await page.setInputFiles('.dropzone input[type=file]', sample);
   await page.waitForSelector('.kpis');
   const rep = await page.evaluate(() => {
     const r = RG.app.S.master.report;
-    return { ch: r.chapters.length, tables: r.tableCount, caps: r.tableCaptionCount, groups: r.groupCount, figs: r.figureCaptionCount, sect: r.sectionBreaks, seq: r.fields.SEQ, noCap: r.captionsWithoutTable };
+    return { ch: r.chapters.length, tables: r.tableCount, caps: r.tableCaptionCount, groups: r.groupCount, figs: r.figureCaptionCount, sect: r.sectionBreaks, seq: r.fields.SEQ, noCap: r.captionsWithoutTable, imgTables: r.imageTables, box: r.boxParagraphs, hf: r.headerFooter };
   });
   console.log('structure', JSON.stringify(rep));
   ok(rep.ch === 6, '辨識出 6 章');
-  ok(rep.tables === 5 && rep.caps === 5, '5 張表格與 5 個表名');
-  ok(rep.noCap.length === 0, '每個表名都對應到表格');
+  ok(rep.tables === 5 && rep.caps === 7, '5 張表格、7 個表名（含 2 張表格截圖）');
+  ok(rep.noCap.length === 0, '每個表名都對應到表格或表格截圖');
+  ok(rep.imgTables.join() === '表2-1,表2-2', '辨識出表格截圖：表名下方是圖片、1 格表格內放圖片');
+  ok(rep.box === 1 && rep.hf === 1, '辨識出文字方塊段落 1 個、有文字的頁首頁尾 1 個');
   ok(rep.groups === 3, '表4-1 切出 3 個分項工程子表格');
-  ok(rep.figs === 1, '1 個圖名');
-  ok(rep.seq === 6, 'SEQ 功能變數 6 個');
+  ok(rep.figs === 2, '2 個圖名');
+  ok(rep.seq === 9, 'SEQ 功能變數 9 個');
+  const figs = await page.evaluate(() => RG.app.S.master.blocks.filter((b) => b.kind === 'figure').map((b) => `${b.capType}${b.capNo}:${b.auto.cat}`));
+  console.log('figures', figs.join(' '));
+  ok(figs.includes('圖1-1:F'), '圖1-1 基地位置圖 → F 專案圖');
+  ok(figs.includes('表2-1:F') && figs.includes('表2-2:F'), '表格截圖（承載力、水位觀測）→ F');
+  ok(figs.includes('圖2-1:T'), '圖2-1 作業流程示意 → T 通用圖');
   await page.screenshot({ path: path.join(outDir, '1-master.png'), fullPage: true });
 
   // 分類
@@ -111,6 +118,9 @@ const ok = (cond, msg) => {
     const B = o.blocks;
     return {
       text: B.map((b) => b.text).join('\n'),
+      figs: B.filter((b) => b.kind === 'figure' && !b.placeholder).map((b) => b.capType + b.capNo),
+      holders: B.filter((b) => b.placeholder).map((b) => b.capType + b.capNo),
+      hf: B.filter((b) => b.hf).map((b) => b.text).join('\n'),
       caps: B.filter((b) => b.kind === 'caption').map((b) => b.text),
       types: o.diffs.reduce((m, d) => ((m[d.type] = (m[d.type] || 0) + 1), m), {}),
       review: o.diffs.filter((d) => d.type === '待審').map((d) => d.reason),
@@ -125,7 +135,12 @@ const ok = (cond, msg) => {
   ok(!outInfo.caps.some((c) => c.includes('擋土設施')), '表3-1 表名已移除');
   ok(!outInfo.text.includes('表3-1 擋土'), '表5-1 中引用已刪除表3-1 的列已移除');
   ok(outInfo.text.includes('新竹縣竹北市虛構活動中心新建工程'), '工程名稱已替換');
-  ok(!outInfo.text.includes('臺中市北屯區第28公墓新建納骨塔工程'), '母本工程名稱無殘留');
+  ok(!outInfo.text.includes('臺中市北屯區第28公墓新建納骨塔工程'), '母本工程名稱無殘留（含封面文字方塊）');
+  ok(outInfo.hf.includes('新竹縣竹北市虛構活動中心新建工程') && !outInfo.hf.includes('第28公墓'), '頁首的工程名稱已替換');
+  ok(['【待補圖：圖1-1 基地位置圖】', '【待補圖：表2-1 基礎容許承載力】', '【待補圖：表2-2 地下水位觀測紀錄】'].every((t) => outInfo.text.includes(t)), 'F 圖片與表格截圖換成【待補圖】佔位框');
+  console.log('output figs', JSON.stringify(outInfo.figs));
+  ok(outInfo.figs.join() === '圖2-1', '只剩 T 通用圖（圖2-1）沿用原圖');
+  ok(outInfo.holders.join() === '圖1-1,表2-1,表2-2', '重新讀入產出檔時，佔位框仍對應到正確的圖名與表名');
   ok(outInfo.text.includes('本案為新竹縣竹北市虛構活動中心新建工程'), '含專案事實的段落沒有被誤刪');
   ok(outInfo.text.includes('地上3層'), '地上層數已替換');
   ok(outInfo.text.includes('【待填：地址】') && !outInfo.text.includes('松竹路'), '未提供的地址標為待填，不帶入母本值');

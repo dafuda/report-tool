@@ -70,6 +70,8 @@ const ok = (cond, msg) => {
   const grp = await page.evaluate(() => { const b = RG.app.S.master.blocks.find((x) => x.kind === 'rows' && x.title.includes('骨櫃')); return RG.app.S.planOverrides[b.id] || ''; });
   ok(grp === 'keep', '工項規劃的使用者指定沿用');
   ok(r.missing.some((t) => t.includes('國豐街253巷')), '被刪除的段落列在「前一份有、這份沒有」');
+  const fig = await page.evaluate(() => { const b = RG.app.S.master.blocks.find((x) => x.kind === 'figure' && x.capName === '基地位置圖'); return b.mem && b.mem.state; });
+  ok(fig === 'exact', '圖片依圖名記憶，換版本後沿用');
 
   // 4. 只看需確認的 → 確認 → 重新整理後同一份母本，全部沿用
   await page.evaluate(() => RG.app.go('classify'));

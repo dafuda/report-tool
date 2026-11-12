@@ -5,7 +5,7 @@
   const K = RG.kb;
   const M = (RG.mem = {});
 
-  M.KINDS = ['p', 'table', 'rows', 'sdt'];
+  M.KINDS = ['p', 'table', 'rows', 'sdt', 'figure'];
   M.HEAD = 600; // 模糊比對只用正規化後前 600 字
   M.empty = () => ({ version: 1, threshold: 0.9, entries: {} });
 
@@ -25,7 +25,8 @@
     h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
     return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
   };
-  const textOf = (b) => (b.kind === 'rows' ? b.title + '\n' + b.text : b.text);
+  /* 圖片沒有文字，以「[圖]圖名」或「[表]表名」記憶（不含編號，編號改版會變） */
+  const textOf = (b) => (b.kind === 'figure' ? (b.capName ? `[${b.capType || '圖'}]${b.capName}` : '') : b.kind === 'rows' ? b.title + '\n' + b.text : b.text);
   M.memorable = (b) => M.KINDS.includes(b.kind) && M.norm(textOf(b)).length > 0;
   M.keyOf = function (b) {
     if (b._memKey) return b._memKey;

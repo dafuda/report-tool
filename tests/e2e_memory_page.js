@@ -22,7 +22,7 @@ const ok = (c, m) => {
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('dialog', (d) => d.accept());
   await page.goto('file://' + path.join(root, 'index.html'));
-  await page.setInputFiles('.drop input[type=file]', v1);
+  await page.setInputFiles('.dropzone input[type=file]', v1);
   await page.waitForFunction(() => RG.app.S.master);
 
   // 準備：全部確認，並刻意做出兩種有問題的記錄

@@ -14,7 +14,7 @@
     overrides: {},
     planOverrides: {},
     manualTags: {},
-    options: { clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true },
+    options: { clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true, figurePlaceholder: true },
     confirmed: false,
     masterSig: '',
     memory: RG.mem.empty(),
@@ -47,7 +47,7 @@
     const base = RG.newFacts();
     for (const k of Object.keys(base)) S.facts[k] = Object.assign(base[k], S.facts[k] || {});
     S.rules = Object.assign(RG.clone(RG.DEFAULT_RULES), S.rules || {});
-    S.options = Object.assign({ clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true }, S.options || {});
+    S.options = Object.assign({ clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true, figurePlaceholder: true }, S.options || {});
   }
   try {
     applyLoaded(JSON.parse(localStorage.getItem(STORE_KEY) || 'null'));
@@ -161,7 +161,7 @@
   /* ---------- 衍生資料 ---------- */
   const tagInfo = () => K.projectTags(S);
   const planRes = (opts) => K.plan(S.master.blocks, S.overrides, tagInfo().set, S.planOverrides, opts);
-  const posOf = (b) => `${b.chapter}${b.capNo ? ' 表' + b.capNo : ''}`;
+  const posOf = (b) => `${b.chapter}${b.capNo ? ' ' + (b.capType || '表') + b.capNo : ''}`;
   function invalidateOutputs() {
     S.lastOutput = null;
     S.restore = null;
@@ -223,12 +223,43 @@
   /* ====================================================================
    * 1. 母本解析
    * ==================================================================== */
+  async function readRels(zip) {
+    const f = zip.file('word/_rels/document.xml.rels');
+    if (!f) return {};
+    const d = D.parseXml(await f.async('string'));
+    const map = {};
+    for (const r of d.getElementsByTagName('Relationship')) map[r.getAttribute('Id')] = r.getAttribute('Target');
+    return map;
+  }
+  /* 圖片縮圖（png／jpg 等可預覽；emf／wmf 只顯示檔名） */
+  function thumb(b) {
+    const m = S.master;
+    if (!m || !m.zip || !b.images || !b.images.length) return null;
+    const target = m.rels[b.images[0]] || '';
+    const path = target.startsWith('/') ? target.slice(1) : 'word/' + target.replace(/^\.\//, '');
+    const ext = (path.split('.').pop() || '').toLowerCase();
+    const more = b.images.length > 1 ? `（共 ${b.images.length} 張）` : '';
+    if (!['png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) return h('div', { class: 'reason' }, `${path.split('/').pop()}（無法預覽）${more}`);
+    S.thumbs = S.thumbs || {};
+    const img = h('img', { alt: '', style: { width: '140px', height: '80px', objectFit: 'contain', background: '#f4f5f7', border: '1px solid var(--line)', borderRadius: '4px', display: 'block', marginTop: '4px', imageRendering: 'auto' } });
+    if (S.thumbs[path]) img.src = S.thumbs[path];
+    else if (m.zip.file(path)) m.zip.file(path).async('blob').then((blob) => { S.thumbs[path] = URL.createObjectURL(blob); img.src = S.thumbs[path]; });
+    return h('div', {}, img, more ? h('div', { class: 'reason' }, more) : null);
+  }
+  const blockText = (b) => {
+    if (b.kind === 'figure') return `［${b.capType === '表' ? '表格截圖' : '圖'}］${b.capNo ? (b.capType || '圖') + b.capNo + ' ' : ''}${b.capName || '（沒有圖名）'}`;
+    return b.kind === 'rows' ? b.title + '\n' + b.text : b.text || '（空白）';
+  };
+  const kindLabel = (b) => (b.kind === 'figure' && b.capType === '表' ? '表格截圖' : b.boxText && b.kind === 'p' ? '段落（含文字方塊）' : K.KIND_LABEL[b.kind] || b.kind);
+
   async function loadMaster(file) {
     await busy(`解析母本中（${fmtSize(file.size)}）…`, async () => {
       const t0 = performance.now();
       const buffer = await file.arrayBuffer();
-      const { doc, styles } = await D.load(buffer);
+      const { zip, doc, styles } = await D.load(buffer);
       const blocks = D.parseBlocks(doc, styles);
+      const hfBlocks = await D.headerFooterBlocks(zip);
+      const rels = await readRels(zip);
       K.classify(blocks, S.rules, S.facts);
       const report = D.structureReport(doc, styles, blocks);
       const sig = `${file.name}:${file.size}`;
@@ -251,7 +282,9 @@
       const res = RG.mem.apply(S.memory, blocks, { overrides: S.overrides, planOverrides: S.planOverrides, sig, prevSig, keepExisting: sameMaster });
       S.memResult = Object.assign(res, { name: file.name, prevName: prevSig && !sameMaster ? prevSig.replace(/:\d+$/, '') : '', sameMaster });
       saveMemory();
-      S.master = { name: file.name, size: file.size, buffer, blocks, report, ms: Math.round(performance.now() - t0) };
+      report.headerFooter = hfBlocks.length;
+      S.thumbs = {};
+      S.master = { name: file.name, size: file.size, buffer, blocks, hfBlocks, zip, rels, report, ms: Math.round(performance.now() - t0) };
       S.masterSig = sig;
       S.ui.cls.mem = '';
       invalidateOutputs();
@@ -266,7 +299,7 @@
     const wrap = h('div', {}, h('h1', { class: 'view-title' }, '1 母本解析與結構驗證'),
       h('p', { class: 'view-desc' }, '讀入母本（設計階段施工風險評估報告 .docx）。工具會拆出每個段落與表格，辨識章節、表名、圖名與子表格，並和規劃書第 3 節的預期結構比對。檔案只在您的電腦上處理，不會上傳。'));
     const inp = filePicker('.docx', loadMaster);
-    const drop = h('div', { class: 'drop', onclick: () => inp.click() }, h('div', { class: 'big' }, S.master ? '重新選擇母本' : '選擇或拖曳母本 .docx 到這裡'), h('div', { class: 'muted' }, '例：28公墓-風險評估報告(進版)1150615 - 測試.docx'), inp);
+    const drop = h('div', { class: 'dropzone', onclick: () => inp.click() }, h('div', { class: 'big' }, S.master ? '重新選擇母本' : '選擇或拖曳母本 .docx 到這裡'), h('div', { class: 'muted' }, '例：28公墓-風險評估報告(進版)1150615 - 測試.docx'), inp);
     drop.addEventListener('dragover', (e) => {
       e.preventDefault();
       drop.classList.add('over');
@@ -295,6 +328,9 @@
         kpi('表格', r.tableCount, `表名 ${r.tableCaptionCount} 個`),
         kpi('子表格（分項工程）', r.groupCount, '表4-13 等'),
         kpi('圖名', r.figureCaptionCount, `圖 ${r.figureCount} 張`),
+        kpi('表格截圖', r.imageTables.length, r.imageTables.length ? r.imageTables.slice(0, 4).join('、') + (r.imageTables.length > 4 ? '…' : '') : '表名下方是圖片'),
+        kpi('文字方塊', r.boxParagraphs, '含文字方塊的段落'),
+        kpi('頁首頁尾', r.headerFooter || 0, '有文字的頁首頁尾'),
         kpi('分節', r.sectionBreaks, '母本約 57 個'),
         kpi('段落', r.paragraphCount),
         kpi('SEQ 功能變數', r.fields.SEQ || 0, `TOC ${r.fields.TOC || 0}・PAGEREF ${r.fields.PAGEREF || 0}`))));
@@ -398,8 +434,8 @@
       return h('tr', { class: o ? 'modified' : '' },
         h('td', {}, h('div', {}, b.id), h('div', { class: 'reason' }, posOf(b)), memBadge(b),
           needsReview(b) ? h('div', {}, h('button', { class: 'btn small', title: '目前的分類與標籤正確，記入記憶', onclick: () => { remember([b]); render(); } }, '✓ 確認')) : null),
-        h('td', {}, h('span', { class: 'badge' }, K.KIND_LABEL[b.kind] || b.kind)),
-        h('td', {}, h('div', { class: 'clamp', title: '點一下展開／收合', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, b.kind === 'rows' ? b.title + '\n' + b.text : b.text || '（空白）')),
+        h('td', {}, h('span', { class: 'badge' }, kindLabel(b))),
+        h('td', {}, h('div', { class: 'clamp', title: '點一下展開／收合', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, blockText(b)), b.kind === 'figure' ? thumb(b) : null),
         h('td', {}, h('span', { class: 'badge cat cat-' + b.auto.cat }, b.auto.cat), ' ', b.auto.tags.map((t) => h('span', { class: 'badge tag' }, t)), h('div', { class: 'reason' }, b.auto.reason)),
         h('td', {}, h('select', { onchange: (ev) => setO({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
         h('td', {}, h('input', { type: 'text', value: e.tags.join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐、地下1層' : '僅 C 類使用', title: e.cat === 'C' ? '新案必須具備全部標籤，這段才會保留' : '只有 C 條件式會用到標籤；此分類填了也不影響產出', style: { width: '200px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => setO({ tags: ev.target.value.split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean) }) }),
@@ -502,6 +538,7 @@
           row('T', '與案子無關的通用文字：前言、方法說明、法規、災害案例、風險矩陣', '原文照抄，不替換專案事實；只做已知錯字更正'),
           row('C', '依構造、工項、環境條件決定是否出現：擋土、開挖、電梯、骨櫃…', '「確認標籤」全部符合新案條件才保留（並替換其中的專案事實），否則整段／整表刪除'),
           row('M', '固定句型中嵌入專案事實：「本案為地下1層、地上4層RC造…」', '只替換句中的專案事實、保留句型；若替換後可能不通（如地下0層）或句中提到新案沒有的工項 → 淺藍底＋註解「待審」'))),
+      h('div', { class: 'muted', style: { marginTop: '8px' } }, '圖片與表格截圖（內容是圖、無法編輯的表格）：F 產出時換成紅框【待補圖：圖x-x 名稱】、T 沿用原圖、C 依確認標籤保留或刪除；依圖名自動初判，沒有圖名或無法判斷時預設為 F。文字方塊內的文字與頁首頁尾，比照所在段落處理專案事實替換與錯字更正。'),
       h('div', { class: 'muted', style: { marginTop: '8px' } }, '確認標籤：只有 C 類會用到。填寫這段內容適用的條件（以頓號分隔），新案必須「全部」具備才保留；例如「擋土柱+斜撐、地下1層」表示有地下室且採擋土柱工法的案子才會出現。新案具備哪些標籤，在「3 專案資料」最下方決定。F／T／M 類填了標籤不會有作用。'));
   }
   function pager(f, pages, total) {
@@ -530,7 +567,7 @@
     for (const b of S.master.blocks) {
       if (['empty', 'other'].includes(b.kind)) continue;
       const e = K.effective(b, S.overrides);
-      rows.push([b.id, b.chapter, b.section || '', K.KIND_LABEL[b.kind], b.capNo ? '表' + b.capNo : '', short(b.kind === 'rows' ? b.title + '\n' + b.text : b.text, 300), b.auto.cat, b.auto.tags.join('、'), b.auto.reason, b.mem ? MEM_LABEL[b.mem.state] + (b.mem.state === 'fuzzy' ? ` ${Math.round(b.mem.sim * 100)}%` : '') : '', e.cat, e.tags.join('、')]);
+      rows.push([b.id, b.chapter, b.section || '', K.KIND_LABEL[b.kind], b.capNo ? (b.capType || '表') + b.capNo : '', short(blockText(b), 300), b.auto.cat, b.auto.tags.join('、'), b.auto.reason, b.mem ? MEM_LABEL[b.mem.state] + (b.mem.state === 'fuzzy' ? ` ${Math.round(b.mem.sim * 100)}%` : '') : '', e.cat, e.tags.join('、')]);
     }
     xlsxDownload('分類確認表.xlsx', [{ name: '分類確認', cols: [9, 8, 18, 8, 8, 60, 8, 22, 26, 10, 9, 24], rows }, { name: '說明', cols: [80], rows: [['匯入時，檔案中出現的每一列都會視為「已確認」並記入記憶庫。'], ['請修改「確認分類」（F／T／C／M）與「確認標籤」（以頓號分隔）兩欄，存檔後在工具中按「匯入確認結果」。'], ['F 專案事實：只屬於本案的資料，從新案資料擷取'], ['T 通用範本：與案子無關的方法論、法規，直接沿用'], ['C 條件式：依構造、工項、環境條件決定是否出現'], ['M 混合：範本句型中嵌入專案事實']] }]);
   }
@@ -784,7 +821,7 @@
     const ti = tagInfo();
     const relevant = S.master.blocks.filter((b) => {
       const e = K.effective(b, S.overrides);
-      return (e.cat === 'C' && e.tags.length) || b.kind === 'rows' || !res[b.id].include || S.planOverrides[b.id];
+      return (e.cat === 'C' && e.tags.length) || b.kind === 'rows' || b.kind === 'figure' || !res[b.id].include || S.planOverrides[b.id];
     });
     const q = f.q.trim();
     const list = relevant.filter((b) => {
@@ -814,8 +851,9 @@
       const po = S.planOverrides[b.id] || '';
       return h('tr', { class: po ? 'modified' : '' },
         h('td', {}, b.id, h('div', { class: 'reason' }, posOf(b))),
-        h('td', {}, h('span', { class: 'badge' }, K.KIND_LABEL[b.kind])),
-        h('td', {}, h('div', { class: 'clamp', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, b.kind === 'rows' ? b.title + '\n' + b.text : b.text)),
+        h('td', {}, h('span', { class: 'badge' }, kindLabel(b))),
+        h('td', {}, h('div', { class: 'clamp', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, blockText(b)), b.kind === 'figure' ? thumb(b) : null,
+          b.kind === 'figure' && r.include ? h('div', { class: 'reason' }, e.cat === 'F' && S.options.figurePlaceholder ? '產出時換成【待補圖】' : '產出時沿用原圖') : null),
         h('td', {}, e.tags.map((t) => h('span', { class: 'badge tag', style: { opacity: ti.set.has(t) ? 1 : 0.55 } }, t))),
         h('td', {}, h('span', { class: 'badge ' + (r.include ? 'keep' : 'drop') }, r.include ? '保留' : '刪除'), h('div', { class: 'reason' }, r.reason)),
         h('td', {}, h('select', { onchange: (ev) => { if (ev.target.value) S.planOverrides[b.id] = ev.target.value; else delete S.planOverrides[b.id]; if (RG.mem.memorable(b)) remember([b]); invalidateOutputs(); save(); render(); } },
@@ -829,7 +867,7 @@
     const rows = [['區塊', '章', '表號', '類型', '內容（前 200 字）', '條件標籤', '自動判定', '理由', '使用者決定（保留／刪除）']];
     for (const b of S.master.blocks) {
       const e = K.effective(b, S.overrides);
-      if (!((e.cat === 'C' && e.tags.length) || b.kind === 'rows' || !res[b.id].include || S.planOverrides[b.id])) continue;
+      if (!((e.cat === 'C' && e.tags.length) || b.kind === 'rows' || b.kind === 'figure' || !res[b.id].include || S.planOverrides[b.id])) continue;
       const po = S.planOverrides[b.id];
       rows.push([b.id, b.chapter, b.capNo ? '表' + b.capNo : '', K.KIND_LABEL[b.kind], short(b.kind === 'rows' ? b.title + ' ' + b.text : b.text, 200), e.tags.join('、'), res[b.id].include ? '保留' : '刪除', res[b.id].reason, po === 'keep' ? '保留' : po === 'drop' ? '刪除' : '']);
     }
@@ -865,13 +903,13 @@
   /* ====================================================================
    * 5. 產出
    * ==================================================================== */
-  const TYPE_COLORS = { 沿用母本: '#8a94a8', 新案資料填入: '#1f5fbf', 待填: '#c62828', 待審: '#2b7bb9', 自動更正: '#0f7f7a', 母本疑義: '#e08a00', 已刪除: '#5a3d8a', 自動計算風險值: '#2e9b5f' };
+  const TYPE_COLORS = { 沿用母本: '#8a94a8', 新案資料填入: '#1f5fbf', 待填: '#c62828', 待補圖: '#b5523b', 待審: '#2b7bb9', 自動更正: '#0f7f7a', 母本疑義: '#e08a00', 已刪除: '#5a3d8a', 自動計算風險值: '#2e9b5f' };
   async function doGenerate() {
     await busy('產出報告中…', async () => {
       const res = planRes();
       const out = await RG.gen.generate(S.master.buffer, { blocks: S.master.blocks, overrides: S.overrides, facts: S.facts, rules: S.rules, options: S.options, planRes: res, tagSet: tagInfo().set });
-      const { doc, styles } = await D.load(out.data);
-      out.blocks = D.parseBlocks(doc, styles);
+      const loaded = await D.load(out.data);
+      out.blocks = D.parseBlocks(loaded.doc, loaded.styles).concat(await D.headerFooterBlocks(loaded.zip));
       out.name = `${S.projectName}_報告書.docx`;
       S.lastOutput = out;
       toast('報告產出完成，請下載報告書與差異清單', 'ok');
@@ -883,7 +921,7 @@
       const facts = RG.clone(S.facts);
       Object.values(facts).forEach((f) => (f.newValue = f.masterValue));
       const res = K.plan(S.master.blocks, S.overrides, new Set(), {}, { keepAll: true });
-      const out = await RG.gen.generate(S.master.buffer, { blocks: S.master.blocks, overrides: S.overrides, facts, rules: S.rules, options: { clean: true, autoFix: true, recomputeRisk: false, updateFields: true, fillMissingF: false, markReview: false }, planRes: res });
+      const out = await RG.gen.generate(S.master.buffer, { blocks: S.master.blocks, overrides: S.overrides, facts, rules: S.rules, options: { clean: true, autoFix: true, recomputeRisk: false, updateFields: true, fillMissingF: false, markReview: false, figurePlaceholder: false }, planRes: res });
       const { doc, styles } = await D.load(out.data);
       const blocks = D.parseBlocks(doc, styles);
       S.restore = Object.assign(RG.gen.compareRestore(S.master.blocks, blocks, S.rules), { data: out.data, uncoveredF: out.stats.uncoveredF });
@@ -916,6 +954,7 @@
       h('div', { class: 'card' }, h('h2', {}, '產出選項'),
         opt('clean', '乾淨版（--clean）', '不加母本疑義的橘底、待審的淺藍底與註解；【待填】紅字仍保留，以免遺漏'),
         opt('fillMissingF', 'F 類找不到新案值時整段／整格標【待填】', '關閉時 F 類只替換有設定的欄位，其餘沿用母本原文（可能殘留母本數字）'),
+        opt('figurePlaceholder', 'F 類圖片與表格截圖換成【待補圖】佔位框', '母本的現場照片、位置圖、配置圖等不帶入新案；圖名保留，請再放入新案的圖。T 類與條件符合的 C 類圖片沿用原圖'),
         opt('markReview', 'M 類句型需改寫時標「待審」', '例如新案地下層數為 0、句中提到新案沒有的工項；以淺藍底＋Word 註解標示，並列入差異清單'),
         opt('autoFix', '自動更正已知錯字', '依「規則設定」的自動更正清單，例如「生方向指示燈」→「逃生方向指示燈」'),
         opt('recomputeRisk', '自動計算風險值', '依風險矩陣（可能性 × 嚴重度）重算風險值與 H／M／L 等級'),
@@ -955,7 +994,7 @@
           h('button', { class: 'btn', onclick: exportDiff }, '下載差異清單 .xlsx'),
           h('button', { class: 'btn', onclick: () => { runCheck(o.blocks, '產出檔：' + o.name, false); go('check'); } }, '對產出檔執行一致性檢查')),
         h('div', { class: 'kpis', style: { marginTop: '12px' } },
-          ...['沿用母本', '新案資料填入', '待填', '待審', '自動更正', '母本疑義', '已刪除', '自動計算風險值'].map((t) => h('div', { class: 'kpi' + (['待填', '待審'].includes(t) && count(t) ? ' warn' : '') }, h('div', { class: 'k' }, t), h('div', { class: 'v' }, count(t))))),
+          ...['沿用母本', '新案資料填入', '待填', '待補圖', '待審', '自動更正', '母本疑義', '已刪除', '自動計算風險值'].map((t) => h('div', { class: 'kpi' + (['待填', '待補圖', '待審'].includes(t) && count(t) ? ' warn' : '') }, h('div', { class: 'k' }, t), h('div', { class: 'v' }, count(t))))),
         h('h2', { style: { marginTop: '16px' } }, '各章來源統計'),
         h('div', { class: 'bars' }, st.chapters.map((c) => {
           const tot = st.types.reduce((n, t) => n + (st.m[c][t] || 0), 0);
@@ -980,8 +1019,8 @@
   }
   async function checkOtherFile(file) {
     await busy('檢查中…', async () => {
-      const { doc, styles } = await D.load(await file.arrayBuffer());
-      runCheck(D.parseBlocks(doc, styles), file.name, false);
+      const { zip, doc, styles } = await D.load(await file.arrayBuffer());
+      runCheck(D.parseBlocks(doc, styles).concat(await D.headerFooterBlocks(zip)), file.name, false);
       render();
     });
   }
@@ -989,7 +1028,7 @@
     const wrap = h('div', {}, h('h1', { class: 'view-title' }, '6 一致性檢查'),
       h('p', { class: 'view-desc' }, '檢查跨章節同一事實不一致、表號與表名引用、日期、數值合理性、風險值、母本殘留名詞、已知錯字與待填項目。頁碼欄目前留空（需轉 PDF 比對，於 Python 版提供）。'));
     wrap.appendChild(h('div', { class: 'card' }, h('div', { class: 'row' },
-      h('button', { class: 'btn', disabled: !S.master, onclick: () => busy('檢查母本…', async () => { runCheck(S.master.blocks, '母本：' + S.master.name, true); render(); }) }, '檢查母本'),
+      h('button', { class: 'btn', disabled: !S.master, onclick: () => busy('檢查母本…', async () => { runCheck(S.master.blocks.concat(S.master.hfBlocks || []), '母本：' + S.master.name, true); render(); }) }, '檢查母本'),
       h('button', { class: 'btn primary', disabled: !S.lastOutput, onclick: () => busy('檢查產出檔…', async () => { runCheck(S.lastOutput.blocks, '產出檔：' + S.lastOutput.name, false); render(); }) }, '檢查最近產出的報告'),
       pickBtn('選擇其他 .docx 檢查', '.docx', checkOtherFile))));
     const c = S.lastCheck;
@@ -1345,6 +1384,8 @@
       ['templateSections', '視為通用範本的節名（正規表示式）', ''],
       ['templateCaptions', '視為通用範本的表名（正規表示式）', ''],
       ['factTableCaptions', '視為專案事實表的表名（正規表示式）', ''],
+      ['figureFactCaptions', '視為 F 專案圖的圖名／表名（正規表示式）', '圖片或表格截圖的名稱符合時，產出換成【待補圖】；沒有名稱或都不符合時也預設為 F'],
+      ['figureTemplateCaptions', '視為 T 通用圖的圖名（正規表示式）', '符合時沿用原圖；出現條件關鍵字的圖會判為 C'],
       ['factValueHeaders', 'F 專案事實表的「值」欄表頭（正規表示式）', '表頭符合的欄位，找不到新案值時整格標【待填】；都不符合時以最後一欄為值欄'],
       ['refTableCaption', '表5-1（依實際表格同步）的表名（正規表示式）', ''],
     ];
@@ -1358,7 +1399,7 @@
               S.rules[key] = isStr ? ta.value.trim() : JSON.parse(ta.value);
               save();
               invalidateOutputs();
-              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions'].includes(key)) reclassifyKeepMemory();
+              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions', 'figureFactCaptions', 'figureTemplateCaptions'].includes(key)) reclassifyKeepMemory();
               toast('已儲存：' + title, 'ok');
             } catch (e) {
               toast('JSON 格式錯誤：' + e.message, 'bad');
@@ -1394,7 +1435,8 @@
         h('li', {}, h('span', { class: 'ic-ok' }, '✓'), '新案資料讀取（docx／xlsx）與欄位建議、確認表（M4，不含 PDF／OCR／Claude 擷取）'),
         h('li', {}, h('span', { class: 'ic-ok' }, '✓'), '依條件標籤規劃工項、表5-1 同步刪列（M5）'),
         h('li', {}, h('span', { class: 'ic-ok' }, '✓'), '差異清單與統計（M8，Excel 圖表需手動插入）'),
-        h('li', {}, h('span', { class: 'ic-warn' }, '…'), '用語資料庫匯入（M6）、Claude 起草（M7）、標準用語統一、DOCPROPERTY 綁定、頁碼對照：尚未實作'))),
+        h('li', {}, h('span', { class: 'ic-ok' }, '✓'), '圖片與表格截圖分類（F 換成【待補圖】佔位框）、文字方塊與頁首頁尾的專案事實替換與檢查'),
+        h('li', {}, h('span', { class: 'ic-warn' }, '…'), '用語資料庫匯入（M6）、Claude 起草（M7）、標準用語統一、DOCPROPERTY 綁定、頁碼對照、上傳新案圖片替換：尚未實作'))),
       h('div', { class: 'card' }, h('h2', {}, '資料保存'), h('p', { class: 'muted' }, '所有檔案都只在瀏覽器中處理，不會上傳。專案資料、分類確認與規則會自動存在這台電腦的瀏覽器中；換電腦或備份時，請用上方「儲存專案檔」。母本 .docx 不會被儲存，每次開啟工具需重新選擇。'),
         h('p', { class: 'muted' }, '記憶庫：你確認或修改過的分類、標籤與工項規劃，會依「段落文字」記在記憶庫中（與專案無關，所有專案共用）。換母本或母本改版時不會整份清除：文字完全相同的段落自動沿用，相似的標為「推定」，新的標為「新段落」，只需核對後兩類。左側「記憶庫」頁可以檢視全部記憶、完整性檢查、逐筆或批次修改與刪除，並可匯出 Excel 修改後匯入；也會一併存入專案檔。')));
   }

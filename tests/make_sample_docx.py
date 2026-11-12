@@ -13,7 +13,8 @@ from pathlib import Path
 from docx import Document
 from docx.enum.section import WD_SECTION
 from docx.enum.style import WD_STYLE_TYPE
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
+from docx.oxml.ns import nsdecls
 from docx.oxml.ns import qn
 from docx.shared import Inches
 
@@ -46,6 +47,16 @@ def add_field(par, instr, result):
     fld("end")
 
 
+def add_textbox(par, text):
+    """在段落中加一個 VML 文字方塊（封面常見）。"""
+    xml = (
+        '<w:r %s><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" style="width:320pt;height:40pt">'
+        '<v:textbox><w:txbxContent><w:p><w:r><w:t>%s</w:t></w:r></w:p></w:txbxContent></v:textbox>'
+        '</v:shape></w:pict></w:r>' % (nsdecls("w"), text)
+    )
+    par._p.append(parse_xml(xml))
+
+
 def caption(doc, kind, ch, n, name):
     p = doc.add_paragraph(style="表名" if kind == "表" else "圖名")
     p.add_run(f"{kind}{ch}-")
@@ -68,7 +79,11 @@ def main(out, v2=False):
     for name in ["章節", "1-1", "表名", "圖名"]:
         doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
 
+    # 頁首（含工程名稱）
+    doc.sections[0].header.paragraphs[0].text = "臺中市北屯區第28公墓新建納骨塔工程　設計階段施工風險評估報告"
+
     # 前置
+    add_textbox(doc.add_paragraph(), "臺中市北屯區第28公墓新建納骨塔工程")
     doc.add_paragraph("臺中市北屯區第28公墓新建納骨塔工程")
     doc.add_paragraph("設計階段施工風險評估報告")
     doc.add_paragraph("中華民國115年6月")
@@ -98,6 +113,17 @@ def main(out, v2=False):
     doc.add_paragraph("第二章 準備作業", style="章節")
     doc.add_paragraph("一、施工風險評估小組之組成", style="1-1")
     doc.add_paragraph("本小組由設計單位組成，評估人員：吳嘉栩。")
+    doc.add_paragraph("二、工址環境現況調查分析", style="1-1")
+    # 表格以截圖呈現：表名下方是圖片段落
+    caption(doc, "表", 2, 1, "基礎容許承載力")
+    doc.add_paragraph().add_run().add_picture(BytesIO(tiny_png()), width=Inches(2))
+    # 表格以截圖呈現：1 格表格內放圖片
+    caption(doc, "表", 2, 2, "地下水位觀測紀錄")
+    t = doc.add_table(rows=1, cols=1)
+    t.cell(0, 0).paragraphs[0].add_run().add_picture(BytesIO(tiny_png()), width=Inches(2))
+    p2 = doc.add_paragraph()
+    p2.add_run().add_picture(BytesIO(tiny_png()), width=Inches(1))
+    caption(doc, "圖", 2, 1, "施工風險評估作業流程示意")
     doc.add_paragraph("四、法規及施工規範彙整分析", style="1-1")
     if v2:
         doc.add_paragraph("營造安全衛生設施標準第 71 條規定，擋土支撐應由專任工程人員妥為設計。")

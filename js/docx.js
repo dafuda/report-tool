@@ -86,7 +86,29 @@
     return out;
   };
   D.paraText = (p) => D.segs(p).map((s) => s.text).join('');
-  D.cellText = (tc) => D.all(tc, 'p').map(D.paraText).join('\n');
+  /* Word 的圖形常同時有新版（mc:Choice）與相容版（mc:Fallback）兩份，讀取時略過相容版以免重複 */
+  D.inFallback = function (n) {
+    for (let x = n.parentNode; x && x.nodeType === 1; x = x.parentNode) if (x.localName === 'Fallback') return true;
+    return false;
+  };
+  D.cellText = (tc) => D.all(tc, 'p').filter((p) => !D.inFallback(p)).map(D.paraText).join('\n');
+  const A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+  const R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const V_NS = 'urn:schemas-microsoft-com:vml';
+  /* 元素中的圖片（不含文字方塊）：回傳關聯 id 清單 */
+  D.imagesIn = function (el) {
+    const ids = [];
+    for (const b of el.getElementsByTagNameNS(A_NS, 'blip')) if (!D.inFallback(b)) ids.push(b.getAttributeNS(R_NS, 'embed') || b.getAttribute('r:embed') || '');
+    for (const v of el.getElementsByTagNameNS(V_NS, 'imagedata')) if (!D.inFallback(v)) ids.push(v.getAttributeNS(R_NS, 'id') || v.getAttribute('r:id') || '');
+    return ids;
+  };
+  /* 元素中文字方塊／圖形內的段落（不含相容版重複的） */
+  D.boxParas = function (el) {
+    const out = [];
+    for (const tb of el.getElementsByTagNameNS(W, 'txbxContent')) if (!D.inFallback(tb)) out.push(...D.all(tb, 'p'));
+    return out;
+  };
+  D.boxText = (el) => D.boxParas(el).map(D.paraText).filter((t) => t.trim()).join('\n');
   D.cellSpan = (tc) => {
     const g = D.kid(D.kid(tc, 'tcPr'), 'gridSpan');
     return g ? parseInt(D.attr(g, 'val'), 10) || 1 : 1;
@@ -97,6 +119,7 @@
     return D.attr(v, 'val') === 'restart' ? 'restart' : 'continue';
   };
 
+  D.cellTextAll = (el) => D.all(el, 'p').filter((p) => !D.inFallback(p)).map(D.paraText).join('');
   D.setT = function (t, s) {
     t.textContent = s;
     t.setAttributeNS(XMLNS, 'xml:space', 'preserve');
@@ -355,10 +378,12 @@
         b.style = sname;
         b.hasSectPr = !!D.kid(pPr, 'sectPr');
         const text = D.paraText(el);
-        b.text = text;
+        const boxText = D.boxText(el);
+        b.text = boxText ? (text.trim() ? text + '\n' : '') + boxText : text;
+        if (boxText) b.boxText = boxText;
         const t = text.replace(/\t+\d*\s*$/, '').trim();
         const isToc = TOC_STYLE.test(sname) || /\t\s*[0-9ivxlcIVXLC]+\s*$/.test(text);
-        const hasDrawing = el.getElementsByTagNameNS(W, 'drawing').length + el.getElementsByTagNameNS(W, 'pict').length > 0;
+        const images = D.imagesIn(el);
         const cap = !isToc && t.length < 90 ? D.parseCaption(t) : null;
         if (isToc) b.kind = 'toc';
         else if (sname === '章節' || (CH_RE.test(t) && t.length < 40)) {
@@ -379,9 +404,24 @@
         } else if (cap && (/表名|圖名|caption|標號/i.test(sname) || t.length < 50)) {
           b.kind = 'caption';
           Object.assign(b, cap);
-        } else if (!t && hasDrawing) b.kind = 'figure';
-        else if (!t) b.kind = 'empty';
-        else b.kind = 'p';
+        } else if (!t && !boxText && images.length) {
+          b.kind = 'figure';
+          b.images = images;
+        } else if (/^【待補圖：[^】]*】$/.test(t) && !boxText) {
+          b.kind = 'figure'; // 產出檔中的待補圖佔位框
+          b.placeholder = true;
+          b.images = [];
+        } else if (!t && !boxText) b.kind = 'empty';
+        else b.kind = 'p'; // 含文字方塊的段落也視為段落，文字方塊內的文字一併處理
+      } else if (el.localName === 'tbl' && ((!D.cellTextAll(el).trim() && D.imagesIn(el).length) || /^【待補圖：[^】]*】$/.test(D.cellTextAll(el).trim()))) {
+        // 只有圖片、沒有文字的表格（例如貼上的表格截圖）視為圖；產出檔中的待補圖佔位也是
+        b.kind = 'figure';
+        b.tableImage = true;
+        b.images = D.imagesIn(el);
+        if (!b.images.length) {
+          b.placeholder = true;
+          b.text = D.cellTextAll(el).trim();
+        }
       } else if (el.localName === 'tbl') {
         b.kind = 'table';
         const rows = D.kids(el, 'tr').map((tr) =>
@@ -436,9 +476,12 @@
     const skip = (b) => b.kind === 'empty' || b.kind === 'other';
     top.forEach((b, i) => {
       if (b.kind === 'caption') {
-        const want = b.capType === '表' ? 'table' : 'figure';
+        // 表名先找表格；找不到再找圖片（表格以截圖呈現）
+        const wants = b.capType === '表' ? ['table', 'figure'] : ['figure'];
         const order = b.capType === '表' ? [1, 2, 3, -1, -2] : [-1, -2, -3, 1, 2];
         for (const d of order) {
+        if (b.linkTo) break;
+        for (const want of wants) {
           const step = d > 0 ? 1 : -1;
           let j = i,
             n = 0;
@@ -455,8 +498,10 @@
             found.captionId = b.id;
             found.capNo = b.capNo;
             found.capName = b.capName;
+            found.capType = b.capType;
             break;
           }
+        }
         }
       } else if (b.kind === 'p' && /^\s*分項工程\s*[：:]/.test(b.text)) {
         for (let j = i + 1; j < Math.min(top.length, i + 4); j++) {
@@ -528,7 +573,9 @@
       tableCount: tables.length,
       tableCaptionCount: tableCaps.length,
       figureCaptionCount: figCaps.length,
-      figureCount: top.filter((b) => b.kind === 'figure').length,
+      figureCount: top.filter((b) => b.kind === 'figure' && b.capType !== '表').length,
+      imageTables: top.filter((b) => b.kind === 'figure' && b.capType === '表').map((b) => '表' + b.capNo),
+      boxParagraphs: top.filter((b) => b.boxText).length,
       sectionBreaks: doc.getElementsByTagNameNS(W, 'sectPr').length,
       fields,
       expectedStyles,
@@ -539,6 +586,67 @@
       groupCount: tables.reduce((n, t) => n + (t.groups ? t.groups.length : 0), 0),
       paragraphCount: top.filter((b) => b.kind === 'p').length,
     };
+  };
+
+  /* ---------- 段落格式（pPr 子元素需依 schema 順序） ---------- */
+  const PPR_ORDER = 'pStyle keepNext keepLines pageBreakBefore framePr widowControl numPr suppressLineNumbers pBdr shd tabs suppressAutoHyphens kinsoku wordWrap overflowPunct topLinePunct autoSpaceDE autoSpaceDN bidi adjustRightInd snapToGrid spacing ind contextualSpacing mirrorIndents suppressOverlap jc textDirection textAlignment textboxTightWrap outlineLvl divId cnfStyle rPr sectPr pPrChange'.split(' ');
+  D.setPprChild = function (p, el) {
+    let pPr = D.kid(p, 'pPr');
+    if (!pPr) {
+      pPr = p.ownerDocument.createElementNS(W, 'w:pPr');
+      p.insertBefore(pPr, p.firstChild);
+    }
+    const old = D.kid(pPr, el.localName);
+    if (old) pPr.removeChild(old);
+    const idx = PPR_ORDER.indexOf(el.localName);
+    let before = null;
+    for (let c = pPr.firstChild; c; c = c.nextSibling) {
+      if (isW(c) && PPR_ORDER.indexOf(c.localName) > idx) {
+        before = c;
+        break;
+      }
+    }
+    pPr.insertBefore(el, before);
+  };
+  /* 把圖片段落換成紅框「待補圖」佔位文字；保留段落格式與分節 */
+  D.makePlaceholder = function (p, text) {
+    const doc = p.ownerDocument;
+    const pPr = D.kid(p, 'pPr');
+    for (const c of Array.from(p.childNodes)) if (c !== pPr) p.removeChild(c);
+    const bdr = doc.createElementNS(W, 'w:pBdr');
+    for (const side of ['top', 'left', 'bottom', 'right']) {
+      const e = doc.createElementNS(W, 'w:' + side);
+      e.setAttributeNS(W, 'w:val', 'single');
+      e.setAttributeNS(W, 'w:sz', '8');
+      e.setAttributeNS(W, 'w:space', '4');
+      e.setAttributeNS(W, 'w:color', 'C00000');
+      bdr.appendChild(e);
+    }
+    D.setPprChild(p, bdr);
+    const jc = doc.createElementNS(W, 'w:jc');
+    jc.setAttributeNS(W, 'w:val', 'center');
+    D.setPprChild(p, jc);
+    const r = D.makeRun(doc, null, text);
+    p.appendChild(r);
+    D.markRun(r, 'todo');
+    D.setRprProp(r, 'b', {});
+    return r;
+  };
+  D.hasImage = (p) => D.imagesIn(p).length > 0;
+
+  /* 頁首頁尾 */
+  D.HF_RE = /^word\/(header|footer)\d*\.xml$/;
+  D.headerFooterParts = (zip) => Object.keys(zip.files).filter((n) => D.HF_RE.test(n)).sort();
+  D.headerFooterBlocks = async function (zip) {
+    const out = [];
+    for (const path of D.headerFooterParts(zip)) {
+      const doc = D.parseXml(await zip.file(path).async('string'));
+      const text = D.all(doc, 'p').filter((p) => !D.inFallback(p)).map(D.paraText).filter((t) => t.trim()).join('\n');
+      if (!text.trim()) continue;
+      const name = path.replace('word/', '');
+      out.push({ id: 'hf:' + name, idx: -1, kind: 'p', chapter: '頁首頁尾', section: name.startsWith('header') ? '頁首' : '頁尾', text, hf: true, part: path });
+    }
+    return out;
   };
 
   /* 讀任意 docx 為純文字（新案資料用）：段落一行、表格每列以 Tab 分隔 */
