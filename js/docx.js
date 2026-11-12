@@ -649,6 +649,63 @@
     return out;
   };
 
+  /* 讀 PowerPoint（.pptx）為純文字（新案資料用）：
+   * 每張投影片前加「【投影片 N】」，文字方塊一段一行，表格每列以 Tab 分隔，備註加「【投影片 N 備註】」 */
+  const P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+  const slideText = function (doc) {
+    const lines = [];
+    const aText = (p) => {
+      let s = '';
+      for (const n of p.getElementsByTagNameNS(A_NS, '*')) {
+        if (n.localName === 't') s += n.textContent;
+        else if (n.localName === 'br') s += '\n';
+        else if (n.localName === 'tab') s += '\t';
+      }
+      return s;
+    };
+    const walk = (el) => {
+      for (let c = el.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType !== 1) continue;
+        if (c.namespaceURI === A_NS && c.localName === 'tbl') {
+          for (const tr of c.getElementsByTagNameNS(A_NS, 'tr')) {
+            const cells = [];
+            for (let tc = tr.firstChild; tc; tc = tc.nextSibling) {
+              if (tc.nodeType === 1 && tc.localName === 'tc') cells.push(Array.from(tc.getElementsByTagNameNS(A_NS, 'p')).map(aText).join(' ').trim());
+            }
+            lines.push(cells.join('\t'));
+          }
+        } else if (c.namespaceURI === A_NS && c.localName === 'p') {
+          const t = aText(c);
+          if (t.trim()) lines.push(t);
+        } else walk(c);
+      }
+    };
+    walk(doc.documentElement);
+    return lines;
+  };
+  D.pptxToText = async function (buffer) {
+    const zip = await JSZip.loadAsync(buffer);
+    const num = (n) => parseInt((n.match(/(\d+)\.xml$/) || [])[1] || '0', 10);
+    const slides = Object.keys(zip.files).filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n)).sort((a, b) => num(a) - num(b));
+    if (!slides.length) throw new Error('不是有效的 PowerPoint（.pptx）檔案');
+    const out = [];
+    for (const path of slides) {
+      const n = num(path);
+      out.push(`【投影片 ${n}】`, ...slideText(D.parseXml(await zip.file(path).async('string'))));
+      // 備註：從投影片的關聯找到 notesSlide
+      const rel = zip.file(`ppt/slides/_rels/slide${n}.xml.rels`);
+      if (rel) {
+        const m = (await rel.async('string')).match(/Target="\.\.\/notesSlides\/(notesSlide\d+\.xml)"/);
+        const nf = m && zip.file('ppt/notesSlides/' + m[1]);
+        if (nf) {
+          const notes = slideText(D.parseXml(await nf.async('string'))).filter((t) => !/^\d+$/.test(t.trim()));
+          if (notes.length) out.push(`【投影片 ${n} 備註】`, ...notes);
+        }
+      }
+    }
+    return out.join('\n');
+  };
+
   /* 讀任意 docx 為純文字（新案資料用）：段落一行、表格每列以 Tab 分隔 */
   D.toPlainText = function (doc) {
     const lines = [];

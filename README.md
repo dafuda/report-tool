@@ -12,7 +12,7 @@
 |---|---|---|
 | 1 母本解析 | 選擇母本 .docx，檢查章、表、圖、分節、樣式是否正確辨識 | 結構驗證報告 .xlsx |
 | 2 分類與標籤確認 | 確認每段的 F 專案事實／T 通用範本／C 條件式／M 混合，以及條件標籤 | 分類確認表 .xlsx（可修改後匯入） |
-| 3 專案資料 | 讀入新案的 docx／xlsx 取得建議值，填寫專案事實、確認條件標籤，勾選「已確認」 | 專案資料確認表 .xlsx |
+| 3 專案資料 | 讀入新案的 Word（.docx）、PowerPoint（.pptx）、Excel（.xlsx／.xls／.csv）取得建議值，填寫專案事實、確認條件標籤，勾選「已確認」 | 專案資料確認表 .xlsx |
 | 4 工項規劃 | 檢視依條件標籤自動決定保留或刪除的內容，可逐筆指定 | 工項規劃表 .xlsx |
 | 5 產出報告 | 產出新案報告書，並可執行「還原測試」 | 報告書 .docx、差異清單 .xlsx |
 | 6 一致性檢查 | 檢查跨章節矛盾、表號引用、日期、風險值、母本殘留、錯字、待填 | 一致性檢查報告 .xlsx |
@@ -46,7 +46,7 @@
 | M1 母本解析與知識庫（分類、標籤、確認表匯出入） | ✅ |
 | M2 還原產出（以母本為樣板複製、還原測試） | ✅ |
 | M3 一致性檢查 | ✅（頁碼欄尚未提供） |
-| M4 新案擷取 | ✅ docx／xlsx 依欄位名稱找建議值；PDF、OCR、Claude API 擷取尚未提供 |
+| M4 新案擷取 | ✅ docx／pptx／xlsx 依欄位名稱找建議值（來源標到投影片、工作表與列號）；PDF、OCR、Claude API 擷取尚未提供 |
 | M5 條件規劃（表號由 Word SEQ 重排、表5-1 同步刪列） | ✅ |
 | M6 用語資料庫 | ⏳ 尚未實作 |
 | M7 Claude 起草 | ⏳ 尚未實作（目前等同 `--no-llm`：母本沒有的內容標【待填】） |
@@ -83,6 +83,8 @@ node tests/unit_keywords.js
 node tests/e2e_memory_page.js   # 需要 openpyxl
 node tests/e2e_scroll.js
 node tests/e2e_classify_tools.js
+python tests/make_case_files.py tests/fixtures
+node tests/e2e_casefiles.js
 ```
 
 `tests/fixtures/sample_master.docx` 是依母本結構虛構的小檔，不含真實母本內容。

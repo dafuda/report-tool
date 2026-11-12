@@ -1028,8 +1028,8 @@
     const ti = tagInfo();
 
     // 新案資料檔
-    wrap.appendChild(h('div', { class: 'card' }, h('h2', {}, '新案資料檔 ', h('span', { class: 'muted' }, '設計說明書、興建計畫書、地質報告、預算書…')),
-      h('div', { class: 'row' }, pickBtn('選擇新案檔案（可多選）', '.docx,.xlsx,.xls,.csv,.txt,.pdf', addCaseFiles, 'btn primary', true),
+    wrap.appendChild(h('div', { class: 'card' }, h('h2', {}, '新案資料檔 ', h('span', { class: 'muted' }, '設計說明書、興建計畫書、地質報告、預算書、簡報…（可讀 Word .docx、PowerPoint .pptx、Excel .xlsx／.xls／.csv、文字檔 .txt）')),
+      h('div', { class: 'row' }, pickBtn('選擇新案檔案（可多選）', '.docx,.pptx,.xlsx,.xls,.csv,.txt,.pdf,.ppt,.doc', addCaseFiles, 'btn primary', true),
         S.caseFiles.length ? h('button', { class: 'btn', onclick: () => { runSuggest(); render(); } }, '重新尋找建議值') : null,
         S.caseFiles.length ? h('button', { class: 'btn', onclick: acceptAllSuggestions }, '空白欄位全部採用建議') : null,
         S.caseFiles.length ? h('button', { class: 'btn ghost', onclick: () => { S.caseFiles = []; S.suggestions = {}; render(); } }, '清除檔案') : null),
@@ -1128,7 +1128,10 @@
           } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
             const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
             item.text = wb.SheetNames.map((n) => `【工作表 ${n}】\n` + XLSX.utils.sheet_to_csv(wb.Sheets[n], { FS: '\t', blankrows: false })).join('\n');
+          } else if (ext === 'pptx') {
+            item.text = await D.pptxToText(await file.arrayBuffer());
           } else if (ext === 'txt') item.text = await file.text();
+          else if (ext === 'ppt' || ext === 'doc') item.error = `舊版 .${ext} 格式無法讀取，請在 Office 中「另存新檔」為 .${ext}x 後再選擇`;
           else item.error = 'PDF 目前無法在瀏覽器版讀取，請另存為 Word 或手動填寫';
         } catch (e) {
           item.error = '讀取失敗：' + e.message;
@@ -1142,6 +1145,17 @@
     });
   }
   const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  /* 建議值的來源：Excel 標到工作表、PowerPoint 標到第幾張投影片，其他標到第幾行 */
+  function locateIn(file, idx) {
+    const before = file.text.slice(0, idx);
+    const marks = [...before.matchAll(/【(工作表|投影片) ([^】]+)】/g)];
+    const mk = marks.length ? marks[marks.length - 1] : null;
+    if (mk) {
+      const lineInPart = before.slice(mk.index).split('\n').length - 1;
+      return `${file.name}【${mk[1] === '投影片' ? '第 ' + mk[2].replace(' 備註', '') + ' 張投影片' + (mk[2].includes('備註') ? '備註' : '') : '工作表「' + mk[2] + '」'}】${mk[1] === '工作表' ? `第${lineInPart}列` : ''}`;
+    }
+    return `${file.name} 第${before.split('\n').length}行`;
+  }
   function runSuggest() {
     S.suggestions = {};
     for (const d of RG.FIELD_DEFS) {
@@ -1154,8 +1168,7 @@
           while ((m = re.exec(file.text))) {
             const v = m[1].trim().replace(/[。；;，,]+$/, '');
             if (!v || out.some((x) => x.value === v)) continue;
-            const line = file.text.slice(0, m.index).split('\n').length;
-            out.push({ value: v, src: `${file.name} 第${line}行`, snippet: m[0].trim() });
+            out.push({ value: v, src: locateIn(file, m.index + m[0].match(/^[\n\t\s　]*/)[0].length), snippet: m[0].trim() });
             if (out.length >= 3) break;
           }
           if (out.length >= 3) break;
