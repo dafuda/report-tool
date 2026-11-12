@@ -181,6 +181,46 @@ const ok = (c, m) => {
   await page.click('.bulkbar button:has-text("全部改回自動")');
   ok((await page.evaluate(() => Object.keys(RG.app.S.planOverrides).length)) === 0, '工項規劃批次：全部改回自動');
 
+  // ---------- 6. 工項規劃的複選 ----------
+  await page.click('button:has-text("清除所有篩選")');
+  const ppid = await page.evaluate(() => RG.app.S.ui.planPageIds);
+  ok(ppid.length >= 6, `工項規劃清單有 ${ppid.length} 筆可測試`);
+  const psel = () => page.evaluate(() => Object.keys(RG.app.S.ui.plan.sel || {}).filter((k) => RG.app.S.ui.plan.sel[k]));
+  await page.click(cell(ppid[1]));
+  await page.click(cell(ppid[3]), { modifiers: ['Shift'] });
+  let ps = await psel();
+  ok(ps.length === 3 && [1, 2, 3].every((i) => ps.includes(ppid[i])), '工項規劃：Shift＋點選選取範圍（3 筆）');
+  ok((await page.textContent('[data-bulk-label]')).includes('已選取的 3 筆'), '工項規劃：批次列改為「對已選取的 3 筆」');
+  await page.click('.bulkbar button:has-text("全部刪除")');
+  const po = await page.evaluate(() => RG.app.S.planOverrides);
+  ok(Object.keys(po).length === 3 && [1, 2, 3].every((i) => po[ppid[i]] === 'drop'), '工項規劃：只有已選取的 3 筆設為刪除');
+  ok((await psel()).length === 3, '工項規劃：套用後勾選保留');
+  await page.click('button:has-text("取消選取")');
+  ok((await psel()).length === 0, '工項規劃：取消選取');
+  await page.$eval(cell(ppid[Math.min(4, ppid.length - 1)]), (el) => el.scrollIntoView({ block: 'center' }));
+  const pb = async (id) => (await page.$(cell(id))).boundingBox();
+  const p0 = await pb(ppid[3]);
+  await page.mouse.move(p0.x + p0.width / 2, p0.y + p0.height / 2);
+  await page.mouse.down();
+  for (const i of [4, 5]) {
+    const bb = await pb(ppid[i]);
+    await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2, { steps: 3 });
+  }
+  await page.mouse.up();
+  ps = await psel();
+  ok(ps.length === 3 && [3, 4, 5].every((i) => ps.includes(ppid[i])), '工項規劃：按住拖曳連續選取（3 筆）');
+  await page.click('.bulkbar button:has-text("全部保留")');
+  const po2 = await page.evaluate(() => RG.app.S.planOverrides);
+  ok([3, 4, 5].every((i) => po2[ppid[i]] === 'keep'), '工項規劃：已選取的設為保留');
+  await page.click('button:has-text("取消選取")');
+  await page.click('input[data-sel-all]');
+  ok((await psel()).length === (await page.evaluate(() => RG.app.S.ui.planPageIds.length)), '工項規劃：表頭勾選框選取本頁全部');
+  await page.click('.bulkbar button:has-text("全部改回自動")');
+  ok((await page.evaluate(() => Object.keys(RG.app.S.planOverrides).length)) === 0, '工項規劃：已選取的全部改回自動');
+  // 分類頁與工項規劃頁的勾選互不影響
+  await page.evaluate(() => RG.app.go('classify'));
+  ok((await page.evaluate(() => Object.keys(RG.app.S.ui.cls.sel || {}).filter((k) => RG.app.S.ui.cls.sel[k]).length)) === 0, '分類頁的勾選不受工項規劃頁影響');
+
   ok(errors.length === 0, '頁面沒有 JavaScript 錯誤' + (errors.length ? '：' + errors.join('; ') : ''));
   await browser.close();
   console.log(failed ? `\n${failed} 項失敗` : '\n全部通過');
