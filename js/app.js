@@ -208,14 +208,33 @@
     render();
     window.scrollTo(0, 0);
   }
+  /* 目前畫面的「清單狀態」：同一頁、同一篩選條件下重畫時，保留清單捲動位置與輸入焦點 */
+  let lastListSig = '';
+  const listSig = () => {
+    const st = { classify: S.ui.cls, plan: S.ui.plan, memory: S.ui.memv, generate: { t: S.ui.diffType }, check: { i: S.ui.checkItem } }[S.view] || {};
+    return S.view + ':' + JSON.stringify(st, (k, v) => (k === 'sel' ? undefined : v));
+  };
   function render() {
     renderNav();
     const main = $('#main');
     const scroll = window.scrollY;
+    const sig = listSig();
+    const keep = sig === lastListSig;
+    const wraps = keep ? [...main.querySelectorAll('.tbl-wrap')].map((w) => w.scrollTop) : [];
+    const ae = document.activeElement;
+    const focusKey = keep && ae && main.contains(ae) ? ae.getAttribute('data-fk') : null;
     main.innerHTML = '';
     const v = VIEWS.find((x) => x.id === S.view) || VIEWS[0];
     main.appendChild(v.render());
+    main.querySelectorAll('.tbl-wrap').forEach((w, i) => {
+      if (wraps[i] != null) w.scrollTop = wraps[i];
+    });
+    if (focusKey) {
+      const el = main.querySelector(`[data-fk="${CSS.escape(focusKey)}"]`);
+      if (el) el.focus({ preventScroll: true });
+    }
     window.scrollTo(0, scroll);
+    lastListSig = sig;
   }
   const needMaster = () =>
     h('div', { class: 'card' }, h('div', { class: 'note warn' }, '請先在「1 母本解析」讀入母本 .docx。'), h('button', { class: 'btn primary', onclick: () => go('master') }, '前往母本解析'));
@@ -463,8 +482,8 @@
         h('td', {}, h('span', { class: 'badge' }, kindLabel(b))),
         h('td', {}, h('div', { class: 'clamp', title: '點一下展開／收合', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, blockText(b)), b.kind === 'figure' ? thumb(b) : null),
         h('td', {}, h('span', { class: 'badge cat cat-' + b.auto.cat }, b.auto.cat), ' ', b.auto.tags.map((t) => h('span', { class: 'badge tag' }, t)), h('div', { class: 'reason' }, b.auto.reason)),
-        h('td', {}, h('select', { onchange: (ev) => setO({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
-        h('td', {}, h('input', { type: 'text', value: e.tags.join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐、地下1層' : '僅 C 類使用', title: e.cat === 'C' ? '新案必須具備全部標籤，這段才會保留' : '只有 C 條件式會用到標籤；此分類填了也不影響產出', style: { width: '200px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => setO({ tags: ev.target.value.split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean) }) }),
+        h('td', {}, h('select', { 'data-fk': b.id + ':cat', onchange: (ev) => setO({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
+        h('td', {}, h('input', { type: 'text', 'data-fk': b.id + ':tags', value: e.tags.join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐、地下1層' : '僅 C 類使用', title: e.cat === 'C' ? '新案必須具備全部標籤，這段才會保留' : '只有 C 條件式會用到標籤；此分類填了也不影響產出', style: { width: '200px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => setO({ tags: ev.target.value.split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean) }) }),
           o ? h('div', {}, h('button', { class: 'btn small', onclick: () => { delete S.overrides[b.id]; remember([b]); save(); render(); } }, '還原自動判斷')) : null));
     });
     wrap.appendChild(h('div', { class: 'card' },
@@ -555,7 +574,9 @@
   }
   function classifyLegend() {
     const row = (c, what, result) => h('tr', {}, h('td', {}, h('span', { class: 'badge cat cat-' + c }, c), ' ', K.CATS[c]), h('td', {}, what), h('td', {}, result));
-    return h('details', { class: 'card', open: !S.master || !Object.keys(S.overrides).length },
+    // 展開／收合狀態由使用者決定並記住，不會因為修改分類而自動收合（避免畫面跳動）
+    if (S.ui.legendOpen === undefined) S.ui.legendOpen = !S.master || !Object.keys(S.overrides).length;
+    return h('details', { class: 'card', open: S.ui.legendOpen, ontoggle: (ev) => (S.ui.legendOpen = ev.currentTarget.open) },
       h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '分類代號與「確認標籤」說明'),
       h('table', { class: 'data', style: { marginTop: '10px' } },
         h('thead', {}, h('tr', {}, h('th', {}, '分類'), h('th', {}, '指的是'), h('th', {}, '產出時的處理'))),
@@ -882,7 +903,7 @@
           b.kind === 'figure' && r.include ? h('div', { class: 'reason' }, e.cat === 'F' && S.options.figurePlaceholder ? '產出時換成【待補圖】' : '產出時沿用原圖') : null),
         h('td', {}, e.tags.map((t) => h('span', { class: 'badge tag', style: { opacity: ti.set.has(t) ? 1 : 0.55 } }, t))),
         h('td', {}, h('span', { class: 'badge ' + (r.include ? 'keep' : 'drop') }, r.include ? '保留' : '刪除'), h('div', { class: 'reason' }, r.reason)),
-        h('td', {}, h('select', { onchange: (ev) => { if (ev.target.value) S.planOverrides[b.id] = ev.target.value; else delete S.planOverrides[b.id]; if (RG.mem.memorable(b)) remember([b]); invalidateOutputs(); save(); render(); } },
+        h('td', {}, h('select', { 'data-fk': b.id + ':plan', onchange: (ev) => { if (ev.target.value) S.planOverrides[b.id] = ev.target.value; else delete S.planOverrides[b.id]; if (RG.mem.memorable(b)) remember([b]); invalidateOutputs(); save(); render(); } },
           [['', '自動'], ['keep', '保留'], ['drop', '刪除']].map(([v, l]) => h('option', { value: v, selected: po === v }, l)))));
     });
     wrap.appendChild(h('div', { class: 'card' }, h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' }, h('thead', {}, h('tr', {}, ['區塊', '類型', '內容', '條件標籤', '判定', '決定'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))), pager(f, pages, list.length)));
@@ -1248,9 +1269,9 @@
         h('td', {}, h('div', { class: 'clamp', title: '點一下展開正規化後的全文（前 600 字）', onclick: (ev) => { const el = ev.currentTarget; el.classList.toggle('open'); el.textContent = el.classList.contains('open') ? e.nh.replace(/\|/g, '\n') : e.pv; } }, e.pv),
           h('div', { class: 'reason' }, K.KIND_LABEL[e.kind] || e.kind, `・${e.len} 字`, cur.has(k) ? '・目前母本有' : ''),
           e.conflict ? h('span', { class: 'badge user' }, '衝突') : null),
-        h('td', {}, h('select', { onchange: (ev) => edit({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
-        h('td', {}, h('input', { type: 'text', value: (e.tags || []).join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐' : '僅 C 類使用', style: { width: '170px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => edit({ tags: ev.target.value.split(/[、,，;；]+/).map((x) => x.trim()).filter(Boolean) }) })),
-        h('td', {}, h('select', { onchange: (ev) => edit({ plan: ev.target.value }) }, [['', '自動'], ['keep', '保留'], ['drop', '刪除']].map(([v, l]) => h('option', { value: v, selected: (e.plan || '') === v }, l)))),
+        h('td', {}, h('select', { 'data-fk': k + ':cat', onchange: (ev) => edit({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
+        h('td', {}, h('input', { type: 'text', 'data-fk': k + ':tags', value: (e.tags || []).join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐' : '僅 C 類使用', style: { width: '170px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => edit({ tags: ev.target.value.split(/[、,，;；]+/).map((x) => x.trim()).filter(Boolean) }) })),
+        h('td', {}, h('select', { 'data-fk': k + ':plan', onchange: (ev) => edit({ plan: ev.target.value }) }, [['', '自動'], ['keep', '保留'], ['drop', '刪除']].map(([v, l]) => h('option', { value: v, selected: (e.plan || '') === v }, l)))),
         h('td', { class: 'reason' }, (e.masters || []).map((m) => h('div', {}, RG.mem.masterName(m)))),
         h('td', { class: 'reason' }, e.updated ? new Date(e.updated).toLocaleString('zh-TW') : ''),
         h('td', {}, h('button', { class: 'btn small danger', onclick: () => {

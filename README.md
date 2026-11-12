@@ -77,6 +77,7 @@ python tests/make_sample_docx.py tests/fixtures/sample_master_v2.docx --v2
 node tests/e2e_memory.js
 node tests/unit_keywords.js
 node tests/e2e_memory_page.js   # 需要 openpyxl
+node tests/e2e_scroll.js
 ```
 
 `tests/fixtures/sample_master.docx` 是依母本結構虛構的小檔，不含真實母本內容。
