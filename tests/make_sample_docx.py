@@ -1,6 +1,8 @@
 """產生一份模擬母本結構的測試用 docx（不含真實母本內容）。
 
 用法：python tests/make_sample_docx.py tests/fixtures/sample_master.docx
+      python tests/make_sample_docx.py tests/fixtures/sample_master_v2.docx --v2
+--v2 產生「改版」母本：第一章開頭多一段、一段文字略改、一段刪除，用來測試依文字內容記憶。
 """
 import struct
 import sys
@@ -61,7 +63,7 @@ def table(doc, rows):
     return t
 
 
-def main(out):
+def main(out, v2=False):
     doc = Document()
     for name in ["章節", "1-1", "表名", "圖名"]:
         doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
@@ -76,8 +78,11 @@ def main(out):
     # 第一章
     doc.add_paragraph("第一章 工程計畫概要", style="章節")
     doc.add_paragraph("一、計畫緣起與目標", style="1-1")
+    if v2:
+        doc.add_paragraph("本計畫配合市府殯葬設施整體規劃辦理，期提升納骨空間之使用效率。")
     doc.add_paragraph("本案為臺中市北屯區第28公墓新建納骨塔工程，地下1層、地上4層RC造建築物。")
-    doc.add_paragraph("地下停車場出入口由國豐街253巷進、出。")
+    if not v2:
+        doc.add_paragraph("地下停車場出入口由國豐街253巷進、出。")
     doc.add_paragraph("二、計畫範圍及環境", style="1-1")
     doc.add_paragraph("基地位於松竹路旁，基地面積12,345 m²（約1.23公頃），年雨量約1,700 毫米以上。")
     doc.add_paragraph("本地區年平均雨量 127.2mm，相對濕度 78%。")
@@ -94,7 +99,10 @@ def main(out):
     doc.add_paragraph("一、施工風險評估小組之組成", style="1-1")
     doc.add_paragraph("本小組由設計單位組成，評估人員：吳嘉栩。")
     doc.add_paragraph("四、法規及施工規範彙整分析", style="1-1")
-    doc.add_paragraph("營造安全衛生設施標準第 71 條規定，擋土支撐應由專任工程人員設計。")
+    if v2:
+        doc.add_paragraph("營造安全衛生設施標準第 71 條規定，擋土支撐應由專任工程人員妥為設計。")
+    else:
+        doc.add_paragraph("營造安全衛生設施標準第 71 條規定，擋土支撐應由專任工程人員設計。")
     doc.add_section(WD_SECTION.NEW_PAGE)
 
     # 第三章
@@ -144,4 +152,5 @@ def main(out):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "tests/fixtures/sample_master.docx")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    main(args[0] if args else "tests/fixtures/sample_master.docx", v2="--v2" in sys.argv)

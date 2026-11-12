@@ -17,6 +17,8 @@
     options: { clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true },
     confirmed: false,
     masterSig: '',
+    memory: RG.mem.empty(),
+    memResult: null,
     projectName: '新案A',
     caseFiles: [],
     suggestions: {},
@@ -24,7 +26,7 @@
     lastCheck: null,
     restore: null,
     view: 'master',
-    ui: { cls: { page: 0, chapter: '', cat: '', kind: '', q: '', onlyFlag: false, onlyMod: false }, plan: { page: 0, filter: 'all', q: '' }, showMaster: false, diffType: '', checkItem: '' },
+    ui: { cls: { page: 0, chapter: '', cat: '', kind: '', q: '', onlyFlag: false, onlyMod: false, mem: '' }, plan: { page: 0, filter: 'all', q: '' }, showMaster: false, diffType: '', checkItem: '' },
   };
   const PERSIST = ['facts', 'rules', 'overrides', 'planOverrides', 'manualTags', 'options', 'confirmed', 'masterSig', 'projectName'];
 
@@ -50,6 +52,34 @@
   } catch (e) {
     /* ignore */
   }
+
+  /* ---------- 記憶庫（依文字內容記住分類與標籤，跨母本、跨專案共用） ---------- */
+  const MEM_KEY = 'rg-memory-v1';
+  try {
+    const m = JSON.parse(localStorage.getItem(MEM_KEY) || 'null');
+    if (m && m.entries) S.memory = Object.assign(RG.mem.empty(), m);
+  } catch (e) {
+    /* ignore */
+  }
+  let memWarned = false;
+  function saveMemory() {
+    try {
+      localStorage.setItem(MEM_KEY, JSON.stringify(S.memory));
+    } catch (e) {
+      if (!memWarned) toast('記憶庫太大，無法存在瀏覽器中。請用「匯出記憶庫」另存備份。', 'bad');
+      memWarned = true;
+    }
+  }
+  const memCtx = () => ({ overrides: S.overrides, planOverrides: S.planOverrides, sig: S.masterSig });
+  /* 把區塊目前的分類／標籤／工項規劃記入記憶，並標為已確認 */
+  function remember(blocks) {
+    const list = blocks.filter((b) => RG.mem.memorable(b));
+    RG.mem.recordMany(S.memory, list, memCtx());
+    list.forEach((b) => (b.mem = { state: 'confirmed' }));
+    saveMemory();
+    return list.length;
+  }
+  const needsReview = (b) => b.mem && (b.mem.state === 'fuzzy' || b.mem.state === 'new');
 
   /* ---------- 小工具 ---------- */
   function h(tag, props, ...children) {
@@ -199,18 +229,32 @@
       K.classify(blocks, S.rules, S.facts);
       const report = D.structureReport(doc, styles, blocks);
       const sig = `${file.name}:${file.size}`;
-      if (S.masterSig && S.masterSig !== sig && (Object.keys(S.overrides).length || Object.keys(S.planOverrides).length)) {
-        if (confirm('這份母本與先前確認分類時用的母本不同。要清除先前的分類確認與工項規劃嗎？\n（選「取消」則保留，但區塊編號可能對不上）')) {
-          S.overrides = {};
-          S.planOverrides = {};
-        }
+      const prevSig = S.masterSig;
+      const sameMaster = prevSig === sig;
+      // 目前畫面上的母本：先把修改記入記憶，避免遺失
+      if (S.master) {
+        const touched = S.master.blocks.filter((b) => S.overrides[b.id] || S.planOverrides[b.id]);
+        if (touched.length) RG.mem.recordMany(S.memory, touched, memCtx());
       }
+      if (sameMaster) {
+        // 同一份母本：區塊編號可信，舊的修改直接保留，並補記入記憶（相容舊版本的資料）
+        const touched = blocks.filter((b) => S.overrides[b.id] || S.planOverrides[b.id]);
+        if (touched.length) RG.mem.recordMany(S.memory, touched, { overrides: S.overrides, planOverrides: S.planOverrides, sig });
+      } else {
+        // 不同母本：區塊編號對不上，改用文字內容對應記憶
+        S.overrides = {};
+        S.planOverrides = {};
+      }
+      const res = RG.mem.apply(S.memory, blocks, { overrides: S.overrides, planOverrides: S.planOverrides, sig, prevSig, keepExisting: sameMaster });
+      S.memResult = Object.assign(res, { name: file.name, prevName: prevSig && !sameMaster ? prevSig.replace(/:\d+$/, '') : '', sameMaster });
+      saveMemory();
       S.master = { name: file.name, size: file.size, buffer, blocks, report, ms: Math.round(performance.now() - t0) };
       S.masterSig = sig;
+      S.ui.cls.mem = '';
       invalidateOutputs();
       S.lastCheck = null;
       save();
-      toast(`母本解析完成：${blocks.filter((b) => !b.parentId).length} 個區塊`, 'ok');
+      toast(`母本解析完成：${blocks.filter((b) => !b.parentId).length} 個區塊。記憶對應：沿用 ${res.exact}、推定 ${res.fuzzy}、新段落 ${res.fresh}`, 'ok');
       render();
     });
   }
@@ -303,6 +347,8 @@
       if (f.kind && b.kind !== f.kind) return false;
       if (f.onlyFlag && e.cat === 'T') return false;
       if (f.onlyMod && !S.overrides[b.id]) return false;
+      if (f.mem === 'todo' && !needsReview(b)) return false;
+      if (f.mem && f.mem !== 'todo' && !(b.mem && b.mem.state === f.mem)) return false;
       if (q && !(b.text.includes(q) || e.tags.join(' ').includes(q) || b.id === q || ('表' + (b.capNo || '')) === q)) return false;
       return true;
     });
@@ -315,6 +361,7 @@
     };
     const sel = (k, opts) => h('select', { onchange: (e) => upd(k, e.target.value) }, opts.map(([v, l]) => h('option', { value: v, selected: f[k] === v }, l)));
 
+    wrap.appendChild(memoryCard(blocks, list));
     wrap.appendChild(h('div', { class: 'card' },
       h('div', { class: 'row between' },
         h('div', { class: 'row' }, Object.entries(counts).map(([c, n]) => h('span', {}, h('span', { class: 'badge cat cat-' + c }, c), ` ${K.CATS[c]} ${n}`)), h('span', { class: 'muted' }, `已修改 ${Object.keys(S.overrides).length} 筆`)),
@@ -328,7 +375,8 @@
         sel('kind', [['', '全部類型'], ...Object.entries(K.KIND_LABEL).filter(([k]) => !['empty', 'other'].includes(k)).map(([k, l]) => [k, l])]),
         h('input', { type: 'search', placeholder: '搜尋文字、標籤、表號（如 表4-13）', value: f.q, style: { width: '260px' }, onchange: (e) => upd('q', e.target.value) }),
         h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: f.onlyFlag, onchange: (e) => upd('onlyFlag', e.target.checked) }), '只看 F／C／M'),
-        h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: f.onlyMod, onchange: (e) => upd('onlyMod', e.target.checked) }), '只看已修改'))));
+        h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: f.onlyMod, onchange: (e) => upd('onlyMod', e.target.checked) }), '只看已修改'),
+        sel('mem', [['', '全部記憶狀態'], ['todo', '需確認（推定＋新段落）'], ['exact', '完全相同沿用'], ['fuzzy', '依前版推定'], ['new', '新段落'], ['confirmed', '本次已確認']]))));
 
     const rows = list.slice(f.page * PAGE, (f.page + 1) * PAGE).map((b) => {
       const e = K.effective(b, S.overrides);
@@ -339,23 +387,104 @@
         if (cur.tags && cur.tags.join('、') === b.auto.tags.join('、')) delete cur.tags;
         if (Object.keys(cur).length) S.overrides[b.id] = cur;
         else delete S.overrides[b.id];
+        remember([b]);
         invalidateOutputs();
         save();
         render();
       };
       return h('tr', { class: o ? 'modified' : '' },
-        h('td', {}, h('div', {}, b.id), h('div', { class: 'reason' }, posOf(b))),
+        h('td', {}, h('div', {}, b.id), h('div', { class: 'reason' }, posOf(b)), memBadge(b),
+          needsReview(b) ? h('div', {}, h('button', { class: 'btn small', title: '目前的分類與標籤正確，記入記憶', onclick: () => { remember([b]); render(); } }, '✓ 確認')) : null),
         h('td', {}, h('span', { class: 'badge' }, K.KIND_LABEL[b.kind] || b.kind)),
         h('td', {}, h('div', { class: 'clamp', title: '點一下展開／收合', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, b.kind === 'rows' ? b.title + '\n' + b.text : b.text || '（空白）')),
         h('td', {}, h('span', { class: 'badge cat cat-' + b.auto.cat }, b.auto.cat), ' ', b.auto.tags.map((t) => h('span', { class: 'badge tag' }, t)), h('div', { class: 'reason' }, b.auto.reason)),
         h('td', {}, h('select', { onchange: (ev) => setO({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
         h('td', {}, h('input', { type: 'text', value: e.tags.join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐、地下1層' : '僅 C 類使用', title: e.cat === 'C' ? '新案必須具備全部標籤，這段才會保留' : '只有 C 條件式會用到標籤；此分類填了也不影響產出', style: { width: '200px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => setO({ tags: ev.target.value.split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean) }) }),
-          o ? h('div', {}, h('button', { class: 'btn small', onclick: () => { delete S.overrides[b.id]; save(); render(); } }, '還原自動判斷')) : null));
+          o ? h('div', {}, h('button', { class: 'btn small', onclick: () => { delete S.overrides[b.id]; remember([b]); save(); render(); } }, '還原自動判斷')) : null));
     });
     wrap.appendChild(h('div', { class: 'card' },
       h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' }, h('thead', {}, h('tr', {}, ['區塊', '類型', '內容', '自動判斷', '確認分類', '確認標籤'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))),
       pager(f, pages, list.length)));
     return wrap;
+  }
+  function memBadge(b) {
+    const m = b.mem;
+    if (!m) return null;
+    if (m.state === 'exact') return h('div', {}, h('span', { class: 'badge keep', title: '文字與記憶庫中的段落完全相同，已沿用先前的確認結果' }, '沿用記憶'));
+    if (m.state === 'confirmed') return h('div', {}, h('span', { class: 'badge keep' }, '已確認'));
+    if (m.state === 'fuzzy') return h('div', {}, h('span', { class: 'badge user', title: (m.note ? m.note + '\n' : '') + '前版文字：' + (m.from || '') }, `推定 ${Math.round((m.sim || 0) * 100)}%`));
+    return h('div', {}, h('span', { class: 'badge drop', title: '記憶庫中沒有相同或相似的段落，目前為自動判斷' }, '新段落'));
+  }
+  function memoryCard(blocks, list) {
+    const st = RG.mem.stats(S.memory);
+    const r = S.memResult;
+    const todo = blocks.filter(needsReview).length;
+    const toConfirm = list.filter((b) => RG.mem.memorable(b) && b.mem && b.mem.state !== 'confirmed');
+    const thrInput = h('input', { type: 'number', min: 70, max: 100, step: 1, value: Math.round((S.memory.threshold || 0.9) * 100), style: { width: '64px' } });
+    const card = h('div', { class: 'card' },
+      h('div', { class: 'row between' },
+        h('h2', {}, '記憶庫 ', h('span', { class: 'muted' }, `${st.count} 筆（來自 ${st.masters} 份母本）${st.conflicts ? `・衝突 ${st.conflicts} 筆` : ''}`)),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', onclick: () => xlsxOrJson() }, '匯出記憶庫'),
+          pickBtn('匯入記憶庫（合併）', '.json', importMemory),
+          h('button', { class: 'btn ghost', onclick: () => {
+            if (!confirm('清除記憶庫中所有記住的分類與標籤？（目前畫面上的分類不受影響）')) return;
+            S.memory = Object.assign(RG.mem.empty(), { threshold: S.memory.threshold });
+            S.master.blocks.forEach((b) => RG.mem.memorable(b) && (b.mem = { state: 'new' }));
+            saveMemory();
+            render();
+          } }, '清除記憶庫'))),
+      h('div', { class: 'muted' }, '你確認或修改過的分類與標籤，會依「段落文字」記住。換母本、母本改版或讀入其他案報告時，相同的段落自動沿用，相似的段落標為「推定」，只需核對推定與新段落。'));
+    if (r) {
+      card.appendChild(h('div', { class: 'note ' + (todo ? 'warn' : 'ok'), style: { marginTop: '10px' } },
+        `讀入「${r.name}」${r.prevName ? `（前一份：${r.prevName}）` : ''}的對應結果：完全相同沿用 ${r.exact} 筆、依前版推定 ${r.fuzzy} 筆、新段落 ${r.fresh} 筆。`,
+        todo ? ` 目前還有 ${todo} 筆需要確認。` : ' 全部都已確認。'));
+    }
+    card.appendChild(h('div', { class: 'row', style: { marginTop: '8px' } },
+      todo ? h('button', { class: 'btn primary', onclick: () => { S.ui.cls.mem = 'todo'; S.ui.cls.page = 0; render(); } }, `只看需確認的 ${todo} 筆`) : null,
+      h('button', { class: 'btn', disabled: !toConfirm.length, title: '目前篩選結果中的分類與標籤都正確，全部記入記憶', onclick: () => {
+        if (!confirm(`將目前篩選出的 ${toConfirm.length} 筆標為「已確認」並記入記憶庫？`)) return;
+        const n = remember(toConfirm);
+        toast(`已確認並記入 ${n} 筆`, 'ok');
+        render();
+      } }, `確認目前篩選的 ${toConfirm.length} 筆`),
+      h('span', { class: 'muted' }, '推定的相似度門檻'), thrInput, h('span', { class: 'muted' }, '%'),
+      h('button', { class: 'btn small', onclick: () => {
+        const v = Math.min(100, Math.max(70, parseInt(thrInput.value, 10) || 90));
+        S.memory.threshold = v / 100;
+        saveMemory();
+        S.memResult = Object.assign(RG.mem.apply(S.memory, S.master.blocks, { overrides: S.overrides, planOverrides: S.planOverrides, sig: S.masterSig, keepExisting: false }), { name: S.master.name, prevName: '', sameMaster: true });
+        invalidateOutputs();
+        save();
+        render();
+        toast(`已用 ${v}% 重新套用記憶`, 'ok');
+      } }, '套用並重新對應')));
+    if (r && r.missing && r.missing.length) {
+      card.appendChild(h('details', { style: { marginTop: '10px' } },
+        h('summary', { style: { cursor: 'pointer' } }, `前一份母本有、這份沒有的段落 ${r.missing.length} 筆（不會套到其他段落，僅供參考）`),
+        h('div', { class: 'tbl-wrap', style: { maxHeight: '300px', marginTop: '6px' } }, h('table', { class: 'data' },
+          h('thead', {}, h('tr', {}, h('th', {}, '類型'), h('th', {}, '內容（前 120 字）'), h('th', {}, '分類'), h('th', {}, '標籤'))),
+          h('tbody', {}, r.missing.slice(0, 300).map((e) => h('tr', {}, h('td', {}, K.KIND_LABEL[e.kind] || e.kind), h('td', {}, e.pv), h('td', {}, h('span', { class: 'badge cat cat-' + e.cat }, e.cat)), h('td', {}, (e.tags || []).join('、')))))))));
+    }
+    return card;
+  }
+  function xlsxOrJson() {
+    download(`分類記憶庫_${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(S.memory), 'application/json');
+  }
+  async function importMemory(file) {
+    try {
+      const m = JSON.parse(await file.text());
+      const n = RG.mem.merge(S.memory, m.memory || m);
+      saveMemory();
+      if (S.master) {
+        S.memResult = Object.assign(RG.mem.apply(S.memory, S.master.blocks, { overrides: S.overrides, planOverrides: S.planOverrides, sig: S.masterSig, keepExisting: true }), { name: S.master.name, prevName: '', sameMaster: true });
+        save();
+      }
+      toast(`已合併 ${n} 筆記憶`, 'ok');
+      render();
+    } catch (e) {
+      toast('記憶庫檔案格式錯誤：' + e.message, 'bad');
+    }
   }
   function classifyLegend() {
     const row = (c, what, result) => h('tr', {}, h('td', {}, h('span', { class: 'badge cat cat-' + c }, c), ' ', K.CATS[c]), h('td', {}, what), h('td', {}, result));
@@ -383,22 +512,25 @@
     render();
   }
   function exportClassify() {
-    const rows = [['區塊', '章', '節', '類型', '表號', '內容（前 300 字）', '自動分類', '自動標籤', '判斷理由', '確認分類', '確認標籤']];
+    const MEM_LABEL = { exact: '沿用記憶', fuzzy: '推定', new: '新段落', confirmed: '已確認' };
+    const rows = [['區塊', '章', '節', '類型', '表號', '內容（前 300 字）', '自動分類', '自動標籤', '判斷理由', '記憶對應', '確認分類', '確認標籤']];
     for (const b of S.master.blocks) {
       if (['empty', 'other'].includes(b.kind)) continue;
       const e = K.effective(b, S.overrides);
-      rows.push([b.id, b.chapter, b.section || '', K.KIND_LABEL[b.kind], b.capNo ? '表' + b.capNo : '', short(b.kind === 'rows' ? b.title + '\n' + b.text : b.text, 300), b.auto.cat, b.auto.tags.join('、'), b.auto.reason, e.cat, e.tags.join('、')]);
+      rows.push([b.id, b.chapter, b.section || '', K.KIND_LABEL[b.kind], b.capNo ? '表' + b.capNo : '', short(b.kind === 'rows' ? b.title + '\n' + b.text : b.text, 300), b.auto.cat, b.auto.tags.join('、'), b.auto.reason, b.mem ? MEM_LABEL[b.mem.state] + (b.mem.state === 'fuzzy' ? ` ${Math.round(b.mem.sim * 100)}%` : '') : '', e.cat, e.tags.join('、')]);
     }
-    xlsxDownload('分類確認表.xlsx', [{ name: '分類確認', cols: [9, 8, 18, 8, 8, 60, 8, 22, 26, 9, 24], rows }, { name: '說明', cols: [80], rows: [['請修改「確認分類」（F／T／C／M）與「確認標籤」（以頓號分隔）兩欄，存檔後在工具中按「匯入確認結果」。'], ['F 專案事實：只屬於本案的資料，從新案資料擷取'], ['T 通用範本：與案子無關的方法論、法規，直接沿用'], ['C 條件式：依構造、工項、環境條件決定是否出現'], ['M 混合：範本句型中嵌入專案事實']] }]);
+    xlsxDownload('分類確認表.xlsx', [{ name: '分類確認', cols: [9, 8, 18, 8, 8, 60, 8, 22, 26, 10, 9, 24], rows }, { name: '說明', cols: [80], rows: [['匯入時，檔案中出現的每一列都會視為「已確認」並記入記憶庫。'], ['請修改「確認分類」（F／T／C／M）與「確認標籤」（以頓號分隔）兩欄，存檔後在工具中按「匯入確認結果」。'], ['F 專案事實：只屬於本案的資料，從新案資料擷取'], ['T 通用範本：與案子無關的方法論、法規，直接沿用'], ['C 條件式：依構造、工項、環境條件決定是否出現'], ['M 混合：範本句型中嵌入專案事實']] }]);
   }
   async function importClassify(file) {
     await busy('匯入分類確認表…', async () => {
       const rows = await readXlsxRows(file, '分類確認');
       const byId = Object.fromEntries(S.master.blocks.map((b) => [b.id, b]));
       let n = 0;
+      const seen = [];
       for (const r of rows) {
         const b = byId[String(r['區塊']).trim()];
         if (!b) continue;
+        seen.push(b);
         const cat = String(r['確認分類'] || '').trim().toUpperCase();
         const tags = String(r['確認標籤'] || '').split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean);
         const o = {};
@@ -409,9 +541,10 @@
           n++;
         } else delete S.overrides[b.id];
       }
+      const m = remember(seen);
       invalidateOutputs();
       save();
-      toast(`已匯入，${n} 筆與自動判斷不同`, 'ok');
+      toast(`已匯入，${n} 筆與自動判斷不同；${m} 筆記入記憶庫`, 'ok');
       render();
     });
   }
@@ -672,7 +805,7 @@
         h('td', {}, h('div', { class: 'clamp', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, b.kind === 'rows' ? b.title + '\n' + b.text : b.text)),
         h('td', {}, e.tags.map((t) => h('span', { class: 'badge tag', style: { opacity: ti.set.has(t) ? 1 : 0.55 } }, t))),
         h('td', {}, h('span', { class: 'badge ' + (r.include ? 'keep' : 'drop') }, r.include ? '保留' : '刪除'), h('div', { class: 'reason' }, r.reason)),
-        h('td', {}, h('select', { onchange: (ev) => { if (ev.target.value) S.planOverrides[b.id] = ev.target.value; else delete S.planOverrides[b.id]; invalidateOutputs(); save(); render(); } },
+        h('td', {}, h('select', { onchange: (ev) => { if (ev.target.value) S.planOverrides[b.id] = ev.target.value; else delete S.planOverrides[b.id]; if (RG.mem.memorable(b)) remember([b]); invalidateOutputs(); save(); render(); } },
           [['', '自動'], ['keep', '保留'], ['drop', '刪除']].map(([v, l]) => h('option', { value: v, selected: po === v }, l)))));
     });
     wrap.appendChild(h('div', { class: 'card' }, h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' }, h('thead', {}, h('tr', {}, ['區塊', '類型', '內容', '條件標籤', '判定', '決定'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))), pager(f, pages, list.length)));
@@ -692,10 +825,13 @@
   async function importPlan(file) {
     await busy('匯入工項規劃表…', async () => {
       const rows = await readXlsxRows(file, '工項規劃');
+      const byIdPlan = Object.fromEntries(S.master.blocks.map((b) => [b.id, b]));
+      const touchedPlan = [];
       let n = 0;
       for (const r of rows) {
         const id = String(r['區塊']).trim();
         const v = String(r['使用者決定（保留／刪除）'] || '').trim();
+        if (byIdPlan[id] && RG.mem.memorable(byIdPlan[id])) touchedPlan.push(byIdPlan[id]);
         if (v === '保留') S.planOverrides[id] = 'keep';
         else if (v === '刪除') S.planOverrides[id] = 'drop';
         else {
@@ -704,6 +840,8 @@
         }
         n++;
       }
+      if (touchedPlan.length) RG.mem.recordMany(S.memory, touchedPlan, memCtx());
+      saveMemory();
       invalidateOutputs();
       save();
       toast(`已匯入 ${n} 筆使用者決定`, 'ok');
@@ -921,7 +1059,8 @@
         h('li', {}, h('span', { class: 'ic-ok' }, '✓'), '依條件標籤規劃工項、表5-1 同步刪列（M5）'),
         h('li', {}, h('span', { class: 'ic-ok' }, '✓'), '差異清單與統計（M8，Excel 圖表需手動插入）'),
         h('li', {}, h('span', { class: 'ic-warn' }, '…'), '用語資料庫匯入（M6）、Claude 起草（M7）、標準用語統一、DOCPROPERTY 綁定、頁碼對照：尚未實作'))),
-      h('div', { class: 'card' }, h('h2', {}, '資料保存'), h('p', { class: 'muted' }, '所有檔案都只在瀏覽器中處理，不會上傳。專案資料、分類確認與規則會自動存在這台電腦的瀏覽器中；換電腦或備份時，請用上方「儲存專案檔」。母本 .docx 不會被儲存，每次開啟工具需重新選擇。')));
+      h('div', { class: 'card' }, h('h2', {}, '資料保存'), h('p', { class: 'muted' }, '所有檔案都只在瀏覽器中處理，不會上傳。專案資料、分類確認與規則會自動存在這台電腦的瀏覽器中；換電腦或備份時，請用上方「儲存專案檔」。母本 .docx 不會被儲存，每次開啟工具需重新選擇。'),
+        h('p', { class: 'muted' }, '記憶庫：你確認或修改過的分類、標籤與工項規劃，會依「段落文字」記在記憶庫中（與專案無關，所有專案共用）。換母本或母本改版時不會整份清除：文字完全相同的段落自動沿用，相似的標為「推定」，新的標為「新段落」，只需核對後兩類。記憶庫可在「2 分類與標籤確認」匯出、匯入（合併）給同事使用，也會一併存入專案檔。')));
   }
 
   /* ---------- 頂端列 ---------- */
@@ -933,6 +1072,7 @@
   $('#btnSaveProject').addEventListener('click', () => {
     const o = { app: 'report-tool', version: 1, savedAt: new Date().toISOString() };
     PERSIST.forEach((k) => (o[k] = S[k]));
+    o.memory = S.memory;
     download(`${S.projectName}_專案檔.json`, JSON.stringify(o, null, 2), 'application/json');
   });
   $('#fileProject').addEventListener('change', async (e) => {
@@ -940,7 +1080,12 @@
     e.target.value = '';
     if (!f) return;
     try {
-      applyLoaded(JSON.parse(await f.text()));
+      const proj = JSON.parse(await f.text());
+      applyLoaded(proj);
+      if (proj.memory) {
+        RG.mem.merge(S.memory, proj.memory);
+        saveMemory();
+      }
       $('#projectName').value = S.projectName;
       if (S.master) K.classify(S.master.blocks, S.rules, S.facts);
       invalidateOutputs();
@@ -952,7 +1097,7 @@
     }
   });
   $('#btnReset').addEventListener('click', () => {
-    if (!confirm('清除所有專案資料、分類確認、工項規劃與規則設定，回到預設值？')) return;
+    if (!confirm('清除所有專案資料、分類確認、工項規劃與規則設定，回到預設值？\n（記憶庫不會清除；要清除請到「2 分類與標籤確認」按「清除記憶庫」）')) return;
     S.facts = RG.newFacts();
     S.rules = RG.clone(RG.DEFAULT_RULES);
     S.overrides = {};
@@ -965,6 +1110,6 @@
     render();
   });
 
-  window.RG.app = { S, render, go, loadMaster };
+  window.RG.app = { S, render, go, loadMaster, remember };
   render();
 })();
