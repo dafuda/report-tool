@@ -194,6 +194,27 @@
     return n;
   };
 
+  /* 直接修改一筆記憶（管理頁用）；修改後視為已解決衝突 */
+  M.update = function (mem, key, patch) {
+    const e = mem.entries[key];
+    if (!e) return null;
+    if (patch.cat !== undefined) e.cat = patch.cat;
+    if (patch.tags !== undefined) e.tags = patch.tags.slice();
+    if (patch.plan !== undefined) e.plan = patch.plan;
+    e.conflict = false;
+    e.updated = Date.now();
+    return e;
+  };
+  M.remove = function (mem, keys) {
+    let n = 0;
+    for (const k of keys) if (mem.entries[k]) {
+      delete mem.entries[k];
+      n++;
+    }
+    return n;
+  };
+  M.masterName = (sig) => String(sig || '').replace(/:\d+$/, '');
+
   M.stats = function (mem) {
     const entries = Object.values(mem.entries);
     const masters = new Set();

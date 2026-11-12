@@ -28,7 +28,7 @@
     lastCheck: null,
     restore: null,
     view: 'master',
-    ui: { cls: { page: 0, chapter: '', cat: '', kind: '', q: '', onlyFlag: false, onlyMod: false, mem: '' }, plan: { page: 0, filter: 'all', q: '' }, showMaster: false, diffType: '', checkItem: '' },
+    ui: { cls: { page: 0, chapter: '', cat: '', kind: '', q: '', onlyFlag: false, onlyMod: false, mem: '' }, memv: { page: 0, q: '', cat: '', tag: '', master: '', kind: '', check: '', sel: {} }, plan: { page: 0, filter: 'all', q: '' }, showMaster: false, diffType: '', checkItem: '' },
   };
   const PERSIST = ['facts', 'rules', 'overrides', 'planOverrides', 'manualTags', 'options', 'confirmed', 'masterSig', 'projectName'];
 
@@ -176,6 +176,7 @@
     { id: 'generate', n: 5, label: '產出報告', sub: '報告書＋差異清單', render: viewGenerate },
     { id: 'check', n: 6, label: '一致性檢查', sub: '跨章節矛盾與殘留', render: viewCheck },
     { sep: true },
+    { id: 'memory', n: '≡', label: '記憶庫', sub: '檢視、修改、完整性檢查', render: viewMemory },
     { id: 'rules', n: '⚙', label: '規則設定', sub: '標籤、更正、檢查規則', render: viewRules },
     { id: 'help', n: '?', label: '使用說明', sub: '流程與注意事項', render: viewHelp },
   ];
@@ -427,6 +428,7 @@
       h('div', { class: 'row between' },
         h('h2', {}, '記憶庫 ', h('span', { class: 'muted' }, `${st.count} 筆（來自 ${st.masters} 份母本）${st.conflicts ? `・衝突 ${st.conflicts} 筆` : ''}`)),
         h('div', { class: 'row' },
+          h('button', { class: 'btn', onclick: () => go('memory') }, '管理記憶庫'),
           h('button', { class: 'btn', title: '依記憶庫歸納條件標籤的關鍵字', onclick: () => { runKeywordSuggest(); go('rules'); } }, '關鍵字建議'),
           h('button', { class: 'btn', onclick: () => xlsxOrJson() }, '匯出記憶庫'),
           pickBtn('匯入記憶庫（合併）', '.json', importMemory),
@@ -1004,6 +1006,252 @@
     return wrap;
   }
 
+
+  /* ====================================================================
+   * 記憶庫管理
+   * ==================================================================== */
+  const PLAN_LABEL = { keep: '保留', drop: '刪除', '': '' };
+  function currentKeys() {
+    if (!S.master) return new Set();
+    return new Set(S.master.blocks.filter((b) => RG.mem.memorable(b)).map((b) => RG.mem.keyOf(b)));
+  }
+  /* 記憶修改後，讓目前母本立即反映 */
+  function refreshAfterMemoryEdit(deletedKeys) {
+    if (S.master) {
+      if (deletedKeys && deletedKeys.size) {
+        for (const b of S.master.blocks) {
+          if (RG.mem.memorable(b) && deletedKeys.has(RG.mem.keyOf(b))) {
+            delete S.overrides[b.id];
+            delete S.planOverrides[b.id];
+            b.mem = { state: 'new' };
+          }
+        }
+      }
+      const r = RG.mem.apply(S.memory, S.master.blocks, { overrides: S.overrides, planOverrides: S.planOverrides, sig: S.masterSig, keepExisting: false });
+      S.memResult = Object.assign(r, { name: S.master.name, prevName: '', sameMaster: true });
+      invalidateOutputs();
+      save();
+    }
+    saveMemory();
+  }
+  const MEM_CHECKS = {
+    conflict: { label: '衝突', desc: '同一段文字在同一份母本中被標成不同分類或標籤', test: (e) => e.conflict },
+    cNoTag: { label: 'C 類沒有標籤', desc: '條件式卻沒有標籤，產出時會一律保留', test: (e) => e.cat === 'C' && !(e.tags || []).length },
+    tagNotC: { label: '有標籤但不是 C', desc: '只有 C 類會用到標籤，這些標籤不會有作用', test: (e) => e.cat !== 'C' && (e.tags || []).length > 0 },
+    planOnT: { label: '有工項規劃決定但不是 C', desc: '非 C 類一律保留，除非指定刪除；請確認是否有意', test: (e) => e.cat !== 'C' && e.plan === 'drop' },
+    notCurrent: { label: '目前母本沒有', desc: '記憶中有、但目前讀入的母本沒有這段文字', test: (e, ctx) => ctx.hasMaster && !ctx.cur.has(e._key) },
+    inCurrent: { label: '目前母本有', desc: '目前讀入的母本中有這段文字', test: (e, ctx) => ctx.cur.has(e._key) },
+  };
+  function viewMemory() {
+    const wrap = h('div', {}, h('h1', { class: 'view-title' }, '記憶庫'),
+      h('p', { class: 'view-desc' }, '這裡列出所有記住的分類、標籤與工項規劃決定（依段落文字記錄，所有專案共用）。可以直接修改、刪除，或匯出 Excel 檢查後再匯入。修改會立即套用到目前讀入的母本。'));
+    const f = S.ui.memv;
+    const cur = currentKeys();
+    const ctx = { cur, hasMaster: !!S.master };
+    const all = Object.entries(S.memory.entries).map(([k, e]) => Object.assign({}, e, { _key: k }));
+    const st = RG.mem.stats(S.memory);
+
+    // ---- 統計 ----
+    const catCount = { F: 0, T: 0, C: 0, M: 0 };
+    const tagCount = {};
+    const masterCount = {};
+    for (const e of all) {
+      catCount[e.cat] = (catCount[e.cat] || 0) + 1;
+      (e.tags || []).forEach((t) => (tagCount[t] = (tagCount[t] || 0) + 1));
+      (e.masters || []).forEach((m) => (masterCount[m] = (masterCount[m] || 0) + 1));
+    }
+    let bytes = 0;
+    try {
+      bytes = JSON.stringify(S.memory).length * 2;
+    } catch (e) {
+      /* ignore */
+    }
+    const last = all.reduce((m, e) => Math.max(m, e.updated || 0), 0);
+    const kpi = (k, v, sub, cls = '') => h('div', { class: 'kpi ' + cls }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), sub ? h('div', { class: 's' }, sub) : null);
+    wrap.appendChild(h('div', { class: 'card' },
+      h('div', { class: 'row between' }, h('h2', {}, '概況'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn', disabled: !all.length, onclick: exportMemoryXlsx }, '匯出 Excel'),
+          pickBtn('匯入 Excel 修改', '.xlsx', importMemoryXlsx),
+          h('button', { class: 'btn', disabled: !all.length, onclick: xlsxOrJson }, '匯出備份 .json'),
+          pickBtn('匯入 .json（合併）', '.json', importMemory))),
+      h('div', { class: 'kpis' },
+        kpi('記憶筆數', st.count, `約 ${Math.max(1, Math.round(bytes / 1024))} KB／瀏覽器上限約 5,000 KB`),
+        ...['F', 'T', 'C', 'M'].map((c) => kpi(`${c} ${K.CATS[c]}`, catCount[c] || 0)),
+        kpi('來源母本', st.masters),
+        kpi('衝突', st.conflicts, '', st.conflicts ? 'warn' : ''),
+        kpi('最後修改', last ? new Date(last).toLocaleDateString('zh-TW') : '—')),
+      Object.keys(tagCount).length ? h('div', { style: { marginTop: '10px' } }, h('span', { class: 'muted' }, '各標籤筆數：'),
+        h('div', { class: 'chips', style: { marginTop: '4px' } }, Object.entries(tagCount).sort((a, b) => b[1] - a[1]).map(([t, n]) => h('button', { class: 'chip ' + (f.tag === t ? 'on' : ''), onclick: () => { f.tag = f.tag === t ? '' : t; f.page = 0; render(); } }, `${t} ${n}`)))) : null,
+      Object.keys(masterCount).length ? h('div', { style: { marginTop: '8px' } }, h('span', { class: 'muted' }, '來源母本：'),
+        h('div', { class: 'chips', style: { marginTop: '4px' } }, Object.entries(masterCount).map(([m, n]) => h('button', { class: 'chip ' + (f.master === m ? 'on' : ''), title: m, onclick: () => { f.master = f.master === m ? '' : m; f.page = 0; render(); } }, `${RG.mem.masterName(m)}${m === S.masterSig ? '（目前）' : ''} ${n}`)))) : null));
+
+    if (!all.length) {
+      wrap.appendChild(h('div', { class: 'card' }, h('div', { class: 'note' }, '記憶庫是空的。在「2 分類與標籤確認」確認或修改分類與標籤後，就會記到這裡；也可以匯入同事的記憶庫 .json。')));
+      return wrap;
+    }
+
+    // ---- 完整性檢查 ----
+    const checkRows = Object.entries(MEM_CHECKS).filter(([k]) => S.master || !['notCurrent', 'inCurrent'].includes(k)).map(([k, c]) => {
+      const n = all.filter((e) => c.test(e, ctx)).length;
+      const isInfo = k === 'inCurrent' || k === 'notCurrent';
+      return h('li', {}, h('span', { class: n && !isInfo ? 'ic-warn' : 'ic-ok' }, n && !isInfo ? '!' : '✓'),
+        h('span', {}, h('b', {}, c.label), ` ${n} 筆`, h('span', { class: 'muted' }, `　${c.desc}`), ' ',
+          n ? h('button', { class: 'btn small', onclick: () => { f.check = k; f.page = 0; render(); } }, '只看這些') : null));
+    });
+    let coverage = null;
+    if (S.master) {
+      const memorable = S.master.blocks.filter((b) => RG.mem.memorable(b));
+      const inMem = memorable.filter((b) => S.memory.entries[RG.mem.keyOf(b)]).length;
+      coverage = h('div', { class: 'note ' + (inMem === memorable.length ? 'ok' : 'warn'), style: { marginTop: '10px' } },
+        `目前母本「${S.master.name}」共 ${memorable.length} 個可記憶的段落／表格，其中 ${inMem} 個已在記憶庫（${memorable.length ? Math.round((inMem / memorable.length) * 100) : 0}%）。`,
+        inMem < memorable.length ? h('span', {}, ' 其餘尚未確認，', h('button', { class: 'btn small', onclick: () => { S.ui.cls.mem = 'todo'; S.ui.cls.page = 0; go('classify'); } }, '到分類頁確認')) : null);
+    }
+    wrap.appendChild(h('div', { class: 'card' }, h('h2', {}, '完整性檢查'), h('ul', { class: 'checklist' }, checkRows), coverage));
+
+    // ---- 篩選與清單 ----
+    const q = M_norm(f.q);
+    const list = all.filter((e) => {
+      if (f.cat && e.cat !== f.cat) return false;
+      if (f.kind && e.kind !== f.kind) return false;
+      if (f.tag && !(e.tags || []).includes(f.tag)) return false;
+      if (f.master && !(e.masters || []).includes(f.master)) return false;
+      if (f.check && !MEM_CHECKS[f.check].test(e, ctx)) return false;
+      if (q && !(e.nh.includes(q) || (e.tags || []).join('、').includes(f.q.trim()))) return false;
+      return true;
+    }).sort((a, b) => (b.updated || 0) - (a.updated || 0));
+    const pages = Math.max(1, Math.ceil(list.length / PAGE));
+    f.page = Math.min(f.page, pages - 1);
+    const shown = list.slice(f.page * PAGE, (f.page + 1) * PAGE);
+    const selKeys = Object.keys(f.sel).filter((k) => f.sel[k] && S.memory.entries[k]);
+    const upd = (k, v) => {
+      f[k] = v;
+      f.page = 0;
+      render();
+    };
+    const sel = (k, opts) => h('select', { onchange: (e) => upd(k, e.target.value) }, opts.map(([v, l]) => h('option', { value: v, selected: f[k] === v }, l)));
+    const anyFilter = f.q || f.cat || f.tag || f.master || f.kind || f.check;
+    const bulkCat = h('select', {}, h('option', { value: '' }, '改分類為…'), Object.keys(K.CATS).map((c) => h('option', { value: c }, `${c} ${K.CATS[c]}`)));
+    wrap.appendChild(h('div', { class: 'card' },
+      h('div', { class: 'row' },
+        h('input', { type: 'search', placeholder: '搜尋內容或標籤', value: f.q, style: { width: '220px' }, onchange: (e) => upd('q', e.target.value) }),
+        sel('cat', [['', '全部分類'], ...Object.entries(K.CATS).map(([c, l]) => [c, `${c} ${l}`])]),
+        sel('kind', [['', '全部類型'], ...RG.mem.KINDS.map((k) => [k, K.KIND_LABEL[k]])]),
+        sel('check', [['', '不限檢查項目'], ...Object.entries(MEM_CHECKS).filter(([k]) => S.master || !['notCurrent', 'inCurrent'].includes(k)).map(([k, c]) => [k, c.label])]),
+        f.tag ? h('span', { class: 'badge tag' }, '標籤：' + f.tag) : null,
+        f.master ? h('span', { class: 'badge' }, '母本：' + RG.mem.masterName(f.master)) : null,
+        anyFilter ? h('button', { class: 'btn small', onclick: () => { Object.assign(f, { q: '', cat: '', tag: '', master: '', kind: '', check: '', page: 0 }); render(); } }, '清除篩選') : null),
+      h('div', { class: 'row', style: { marginTop: '10px' } },
+        h('span', { class: 'muted' }, `已選 ${selKeys.length} 筆`),
+        h('button', { class: 'btn small', onclick: () => { shown.forEach((e) => (f.sel[e._key] = true)); render(); } }, '選取本頁'),
+        h('button', { class: 'btn small', onclick: () => { list.forEach((e) => (f.sel[e._key] = true)); render(); } }, `選取全部篩選結果（${list.length}）`),
+        selKeys.length ? h('button', { class: 'btn small', onclick: () => { f.sel = {}; render(); } }, '取消選取') : null,
+        bulkCat,
+        h('button', { class: 'btn small', disabled: !selKeys.length, onclick: () => {
+          if (!bulkCat.value) return toast('請先選擇要改成的分類');
+          selKeys.forEach((k) => RG.mem.update(S.memory, k, { cat: bulkCat.value }));
+          refreshAfterMemoryEdit();
+          toast(`已將 ${selKeys.length} 筆改為 ${bulkCat.value}`, 'ok');
+          render();
+        } }, '套用'),
+        h('button', { class: 'btn small', disabled: !selKeys.some((k) => S.memory.entries[k].conflict), onclick: () => {
+          let n = 0;
+          selKeys.forEach((k) => { if (S.memory.entries[k].conflict) { RG.mem.update(S.memory, k, {}); n++; } });
+          refreshAfterMemoryEdit();
+          toast(`已將 ${n} 筆衝突標為已解決`, 'ok');
+          render();
+        } }, '衝突標為已解決'),
+        h('button', { class: 'btn small danger', disabled: !selKeys.length, onclick: () => {
+          if (!confirm(`刪除選取的 ${selKeys.length} 筆記憶？目前母本中對應的段落會改回自動判斷。`)) return;
+          const del = new Set(selKeys);
+          RG.mem.remove(S.memory, selKeys);
+          f.sel = {};
+          refreshAfterMemoryEdit(del);
+          toast(`已刪除 ${del.size} 筆記憶`, 'ok');
+          render();
+        } }, '刪除選取'))));
+
+    const rows = shown.map((e) => {
+      const k = e._key;
+      const edit = (patch) => {
+        RG.mem.update(S.memory, k, patch);
+        refreshAfterMemoryEdit();
+        render();
+      };
+      return h('tr', { class: e.conflict ? 'modified' : '' },
+        h('td', {}, h('input', { type: 'checkbox', checked: !!f.sel[k], onchange: (ev) => { f.sel[k] = ev.target.checked; render(); } })),
+        h('td', {}, h('div', { class: 'clamp', title: '點一下展開正規化後的全文（前 600 字）', onclick: (ev) => { const el = ev.currentTarget; el.classList.toggle('open'); el.textContent = el.classList.contains('open') ? e.nh.replace(/\|/g, '\n') : e.pv; } }, e.pv),
+          h('div', { class: 'reason' }, K.KIND_LABEL[e.kind] || e.kind, `・${e.len} 字`, cur.has(k) ? '・目前母本有' : ''),
+          e.conflict ? h('span', { class: 'badge user' }, '衝突') : null),
+        h('td', {}, h('select', { onchange: (ev) => edit({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
+        h('td', {}, h('input', { type: 'text', value: (e.tags || []).join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐' : '僅 C 類使用', style: { width: '170px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => edit({ tags: ev.target.value.split(/[、,，;；]+/).map((x) => x.trim()).filter(Boolean) }) })),
+        h('td', {}, h('select', { onchange: (ev) => edit({ plan: ev.target.value }) }, [['', '自動'], ['keep', '保留'], ['drop', '刪除']].map(([v, l]) => h('option', { value: v, selected: (e.plan || '') === v }, l)))),
+        h('td', { class: 'reason' }, (e.masters || []).map((m) => h('div', {}, RG.mem.masterName(m)))),
+        h('td', { class: 'reason' }, e.updated ? new Date(e.updated).toLocaleString('zh-TW') : ''),
+        h('td', {}, h('button', { class: 'btn small danger', onclick: () => {
+          if (!confirm('刪除這筆記憶？')) return;
+          RG.mem.remove(S.memory, [k]);
+          delete f.sel[k];
+          refreshAfterMemoryEdit(new Set([k]));
+          render();
+        } }, '刪除')));
+    });
+    wrap.appendChild(h('div', { class: 'card' },
+      h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' }, h('thead', {}, h('tr', {}, ['', '內容', '分類', '標籤', '工項規劃', '來源母本', '最後修改', ''].map((x) => h('th', {}, x)))), h('tbody', {}, rows))),
+      pager(f, pages, list.length)));
+    return wrap;
+  }
+  const M_norm = (s) => RG.mem.norm(String(s || '').trim());
+
+  function exportMemoryXlsx() {
+    const rows = [['記憶鍵', '類型', '內容（前 120 字）', '正規化全文（前 600 字）', '分類', '標籤', '工項規劃', '來源母本', '最後修改', '衝突', '刪除']];
+    const all = Object.entries(S.memory.entries).sort((a, b) => (b[1].updated || 0) - (a[1].updated || 0));
+    for (const [k, e] of all) rows.push([k, K.KIND_LABEL[e.kind] || e.kind, e.pv, e.nh.replace(/\|/g, '\n'), e.cat, (e.tags || []).join('、'), PLAN_LABEL[e.plan || ''], (e.masters || []).map(RG.mem.masterName).join('\n'), e.updated ? new Date(e.updated).toLocaleString('zh-TW') : '', e.conflict ? '是' : '', '']);
+    xlsxDownload(`分類記憶庫_${new Date().toISOString().slice(0, 10)}.xlsx`, [
+      { name: '記憶庫', cols: [26, 8, 50, 50, 6, 24, 9, 24, 18, 6, 6], rows },
+      { name: '說明', cols: [90], rows: [['可修改「分類」（F／T／C／M）、「標籤」（以頓號分隔）、「工項規劃」（保留／刪除／空白）三欄；要刪除的列，在「刪除」欄填「刪除」。'], ['「記憶鍵」請勿修改，匯入時依此對應。其他欄位修改不會匯入。'], ['存檔後到工具的「記憶庫」頁按「匯入 Excel 修改」。修改過的列會視為已解決衝突。']] },
+    ]);
+  }
+  async function importMemoryXlsx(file) {
+    await busy('匯入記憶庫 Excel…', async () => {
+      const rows = await readXlsxRows(file, '記憶庫');
+      let changed = 0;
+      let removed = 0;
+      let skipped = 0;
+      const bad = [];
+      const del = new Set();
+      const planMap = { 保留: 'keep', 刪除: 'drop', '': '' };
+      for (const r of rows) {
+        const k = String(r['記憶鍵'] || '').trim();
+        const e = S.memory.entries[k];
+        if (!e) {
+          if (k) skipped++;
+          continue;
+        }
+        if (String(r['刪除'] || '').trim() === '刪除') {
+          del.add(k);
+          continue;
+        }
+        const cat = String(r['分類'] || '').trim().toUpperCase();
+        const tags = String(r['標籤'] || '').split(/[、,，;；]+/).map((x) => x.trim()).filter(Boolean);
+        const planTxt = String(r['工項規劃'] || '').trim();
+        if (!K.CATS[cat] || !(planTxt in planMap)) {
+          bad.push(k);
+          continue;
+        }
+        const plan = planMap[planTxt];
+        if (cat !== e.cat || tags.join('、') !== (e.tags || []).join('、') || plan !== (e.plan || '')) {
+          RG.mem.update(S.memory, k, { cat, tags, plan });
+          changed++;
+        }
+      }
+      removed = RG.mem.remove(S.memory, [...del]);
+      refreshAfterMemoryEdit(del);
+      toast(`已匯入：修改 ${changed} 筆、刪除 ${removed} 筆` + (skipped ? `、${skipped} 筆找不到記憶鍵已略過` : '') + (bad.length ? `、${bad.length} 筆分類或工項規劃填寫錯誤已略過` : ''), bad.length ? '' : 'ok');
+      render();
+    });
+  }
+
   /* ====================================================================
    * 規則設定
    * ==================================================================== */
@@ -1148,7 +1396,7 @@
         h('li', {}, h('span', { class: 'ic-ok' }, '✓'), '差異清單與統計（M8，Excel 圖表需手動插入）'),
         h('li', {}, h('span', { class: 'ic-warn' }, '…'), '用語資料庫匯入（M6）、Claude 起草（M7）、標準用語統一、DOCPROPERTY 綁定、頁碼對照：尚未實作'))),
       h('div', { class: 'card' }, h('h2', {}, '資料保存'), h('p', { class: 'muted' }, '所有檔案都只在瀏覽器中處理，不會上傳。專案資料、分類確認與規則會自動存在這台電腦的瀏覽器中；換電腦或備份時，請用上方「儲存專案檔」。母本 .docx 不會被儲存，每次開啟工具需重新選擇。'),
-        h('p', { class: 'muted' }, '記憶庫：你確認或修改過的分類、標籤與工項規劃，會依「段落文字」記在記憶庫中（與專案無關，所有專案共用）。換母本或母本改版時不會整份清除：文字完全相同的段落自動沿用，相似的標為「推定」，新的標為「新段落」，只需核對後兩類。記憶庫可在「2 分類與標籤確認」匯出、匯入（合併）給同事使用，也會一併存入專案檔。')));
+        h('p', { class: 'muted' }, '記憶庫：你確認或修改過的分類、標籤與工項規劃，會依「段落文字」記在記憶庫中（與專案無關，所有專案共用）。換母本或母本改版時不會整份清除：文字完全相同的段落自動沿用，相似的標為「推定」，新的標為「新段落」，只需核對後兩類。左側「記憶庫」頁可以檢視全部記憶、完整性檢查、逐筆或批次修改與刪除，並可匯出 Excel 修改後匯入；也會一併存入專案檔。')));
   }
 
   /* ---------- 頂端列 ---------- */
