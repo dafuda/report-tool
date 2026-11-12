@@ -15,14 +15,17 @@
     const factLits = [];
     for (const [label, f] of Object.entries(facts)) {
       const nv = String(f.newValue || '').trim();
-      if (nv && nv === String(f.masterValue || '').trim()) continue; // 新案值與母本相同：沿用
+      const same = !!nv && nv === String(f.masterValue || '').trim(); // 新案值與母本相同：沿用原文，但算「有對應」
       for (const lit of RG.literalsOf(f)) {
         factLits.push({
           lit,
-          repl: nv ? (f.format || '{v}').split('{v}').join(nv) : `【待填：${label}】`,
+          repl: same ? lit : nv ? (f.format || '{v}').split('{v}').join(nv) : `【待填：${label}】`,
           mark: nv ? null : 'todo',
           type: nv ? '新案資料填入' : '待填',
           info: label,
+          noop: same,
+          nv,
+          format: f.format || '{v}',
         });
       }
     }
@@ -43,7 +46,7 @@
         let m;
         while ((m = factRe.exec(text))) {
           const x = factMap[m[0]];
-          cand.push({ start: m.index, end: m.index + m[0].length, repl: x.repl, mark: x.mark, type: x.type, info: x.info, prio: 3 });
+          cand.push({ start: m.index, end: m.index + m[0].length, repl: x.repl, mark: x.mark, type: x.type, info: x.info, prio: 3, fact: true, noop: x.noop, nv: x.nv, format: x.format });
         }
       }
       for (const { re, f } of fixes) {
@@ -75,7 +78,31 @@
     };
   };
 
-  const TYPE_ORDER = ['待填', '新案資料填入', '自動更正', '母本疑義'];
+  const TYPE_ORDER = ['待填', '待審', '新案資料填入', '自動更正', '母本疑義'];
+  const ZERO_RE = /^\s*(0|０|無|否|none)\s*$/i;
+  const COUNT_UNIT_RE = /[層座部台臺輛棟戶間處支]/;
+  const ORDINAL_RE = /^\s*[(（]?\d{1,3}[)）.、]?\s*$/;
+
+  /* M 類：判斷替換後句型是否需要人工改寫，回傳原因清單 */
+  G.reviewReasons = function (cat, before, after, ms, ctx, kw, lits) {
+    const reasons = [];
+    for (const m of ms) {
+      if (!m.fact || !m.nv) continue;
+      if (ZERO_RE.test(m.nv) && COUNT_UNIT_RE.test(m.format.replace('{v}', ''))) reasons.push(`「${m.info}」新案值為「${m.nv}」，套入「${m.format}」後句子可能不通（例如應改為「無地下室」）`);
+      else if (/\n/.test(m.nv)) reasons.push(`「${m.info}」新案值有多行，套入句子後請確認句型`);
+      else if (m.nv.length > 30 && before.trim().length > m.end - m.start + 10) reasons.push(`「${m.info}」新案值較長（${m.nv.length} 字），請確認句型`);
+    }
+    if (cat === 'M') {
+      let t = after;
+      for (const l of lits) t = t.split(l).join(' ');
+      for (const k of kw) {
+        if (ctx.tagSet.has(k.tag)) continue;
+        const hit = t.match(k.re);
+        if (hit) reasons.push(`句中提及「${hit[0]}」（條件標籤：${k.tag}），但新案沒有此條件，句子可能需改寫或刪除`);
+      }
+    }
+    return [...new Set(reasons)];
+  };
 
   /* buffer: 母本 ArrayBuffer；ctx: {blocks, overrides, facts, rules, options, planRes} */
   G.generate = async function (buffer, ctx) {
@@ -95,16 +122,57 @@
     const addDiff = (b, loc, type, src, before, after, reason, needCheck) =>
       diffs.push({ chapter: b.chapter, section: b.section || '', loc, type, src, before: short(before || ''), after: short(after || ''), reason, needCheck: needCheck ? '是' : '否' });
 
-    const processParagraph = (b, p, cat, loc) => {
+    const kw = K.compileKeywords(rules.tagKeywords);
+    const allLits = [];
+    for (const f of Object.values(ctx.facts)) allLits.push(...RG.literalsOf(f));
+    const tagSet = ctx.tagSet || new Set();
+    const stats = { uncoveredF: 0, fTodo: 0, review: 0 };
+    const isCovered = (text) => match(text, true).some((m) => m.fact);
+
+    /* opts.wholeTodo=false：表格儲存格由外層逐格判斷，這裡不做整段待填 */
+    const processParagraph = (b, p, cat, loc, opts = {}) => {
       const before = D.paraText(p);
       if (!before.trim()) return false;
-      const ms = match(before, cat !== 'T');
-      if (!ms.length) return false;
-      D.replaceInParagraph(p, ms, (run, m) => {
-        if (m.comment) comments.add(run, m.comment);
-      });
-      const after = D.paraText(p);
-      const types = [...new Set(ms.map((m) => m.type))].sort((a, z) => TYPE_ORDER.indexOf(a) - TYPE_ORDER.indexOf(z));
+      const all = match(before, cat !== 'T');
+      const covered = all.some((m) => m.fact);
+
+      // F 專案事實：整段找不到任何對應的新案欄位 → 整段改為【待填】（保留「欄位：」前綴）
+      if (cat === 'F' && !covered && opts.wholeTodo !== false) {
+        if (!options.fillMissingF) {
+          stats.uncoveredF++;
+        } else {
+          const pm = before.match(/^(\s*)([^：:，。\n]{1,15})([：:])/);
+          const keepLen = pm ? pm[0].length : 0;
+          const label = pm ? pm[2].trim() : '專案事實';
+          const lead = before.slice(keepLen).match(/^\s*/)[0].length;
+          D.replaceInParagraph(p, [{ start: keepLen + lead, end: before.length, repl: `【待填：${label}】`, mark: 'todo' }]);
+          stats.fTodo++;
+          addDiff(b, loc, '待填', '母本 ' + b.id, before, D.paraText(p), 'F 專案事實：找不到對應的新案欄位，整段改為待填（母本原文見左欄，不帶入新案）', true);
+          return true;
+        }
+      }
+
+      const ms = all.filter((m) => !m.noop);
+      if (ms.length) {
+        D.replaceInParagraph(p, ms, (run, m) => {
+          if (m.comment) comments.add(run, m.comment);
+        });
+      }
+      const after = ms.length ? D.paraText(p) : before;
+
+      // M 混合：替換後句型可能需要改寫 → 待審
+      const reasons = options.markReview && cat !== 'T' ? G.reviewReasons(cat, before, after, ms, { tagSet }, kw, allLits) : [];
+      if (reasons.length) {
+        stats.review++;
+        if (!options.clean) {
+          const runs = D.runsOf(p).filter((r) => D.kid(r, 't'));
+          runs.forEach((r) => D.markRun(r, 'review'));
+          if (runs.length) comments.add(runs[0], '待審：' + reasons.join('；'));
+        }
+      }
+      if (!ms.length && !reasons.length) return false;
+
+      const types = [...new Set(ms.map((m) => m.type).concat(reasons.length ? ['待審'] : []))].sort((a, z) => TYPE_ORDER.indexOf(a) - TYPE_ORDER.indexOf(z));
       addDiff(
         b,
         loc,
@@ -112,10 +180,43 @@
         '母本 ' + b.id,
         before,
         after,
-        ms.map((m) => `${m.type}：${m.info}`).join('；'),
-        types.includes('待填') || types.includes('母本疑義') || types.includes('自動更正')
+        ms.map((m) => `${m.type}：${m.info}`).concat(reasons.map((r) => '待審：' + r)).join('；'),
+        types.some((t) => ['待填', '待審', '母本疑義', '自動更正'].includes(t))
       );
       return true;
+    };
+
+    /* F 表格：判斷哪些儲存格是「值」 */
+    const fieldLabels = new Set(RG.FIELD_DEFS.flatMap((d) => [d.label, ...d.labels]));
+    const valueHdrRe = K.safeRe(rules.factValueHeaders || '(?!)');
+    const genericHdrRe = /^(內容|說明|資料|數值|值)$/;
+    const firstLine = (s) => s.trim().split('\n')[0].trim().slice(0, 15);
+    const fTableInfo = (tbl) => {
+      const trs = D.kids(tbl, 'tr');
+      const headers = trs.length ? D.kids(trs[0], 'tc').map((tc) => D.cellText(tc).trim()) : [];
+      const valueCols = new Set();
+      headers.forEach((t, i) => valueHdrRe && t && valueHdrRe.test(t) && valueCols.add(i));
+      if (!valueCols.size && headers.length) valueCols.add(headers.length - 1);
+      return { headers, valueCols };
+    };
+    const isValueCell = (ci, text, info) => {
+      const t = text.trim();
+      if (!t || fieldLabels.has(t) || ORDINAL_RE.test(t) || /^【待填/.test(t)) return false;
+      if (info.headers.includes(t)) return false;
+      return info.valueCols.has(ci) || /\d/.test(t);
+    };
+    const cellLabel = (cells, ci, info) => {
+      let left = '';
+      for (let j = ci - 1; j >= 0; j--) {
+        const t = firstLine(D.cellText(cells[j]));
+        if (t && !ORDINAL_RE.test(t)) {
+          left = t;
+          break;
+        }
+      }
+      const hdr = info.headers[ci] || '';
+      if (left && hdr && !genericHdrRe.test(hdr)) return left + hdr;
+      return left || hdr || '專案事實';
     };
 
     for (const b of blocks) {
@@ -139,6 +240,7 @@
           if (!gr.include) addDiff(gb, `${where(b)} ${g.title}（第${g.rowStart + 1}～${g.rowEnd + 1}列）`, '已刪除', '母本 ' + g.id, gb.text, '', gr.reason, false);
         }
         let changed = false;
+        const fInfo = fTableInfo(el);
         D.kids(el, 'tr').forEach((tr, ri) => {
           const go = groupOfRow[ri];
           if (go && !go.gr.include) {
@@ -147,9 +249,28 @@
             return;
           }
           const rowCat = go ? K.effective(go.gb, overrides).cat : cat;
-          D.kids(tr, 'tc').forEach((tc, ci) => {
+          const owner = go ? go.gb : b;
+          const cells = D.kids(tr, 'tc');
+          cells.forEach((tc, ci) => {
+            const loc = `${where(b)} 第${ri + 1}列第${ci + 1}欄`;
+            // F 表格：「值」儲存格找不到對應的新案欄位 → 整格【待填】（第 1 列視為表頭）
+            if (rowCat === 'F' && ri > 0) {
+              const ct = D.cellText(tc);
+              if (isValueCell(ci, ct, fInfo) && !isCovered(ct)) {
+                if (!options.fillMissingF) stats.uncoveredF++;
+                else {
+                  const label = cellLabel(cells, ci, fInfo);
+                  const run = D.setCellText(tc, `【待填：${label}】`);
+                  if (run) D.markRun(run, 'todo');
+                  stats.fTodo++;
+                  changed = true;
+                  addDiff(owner, loc, '待填', '母本 ' + owner.id, ct, `【待填：${label}】`, 'F 專案事實：找不到對應的新案欄位，整格改為待填（母本原文見左欄，不帶入新案）', true);
+                  return;
+                }
+              }
+            }
             D.all(tc, 'p').forEach((p) => {
-              if (processParagraph(go ? go.gb : b, p, rowCat, `${where(b)} 第${ri + 1}列第${ci + 1}欄`)) changed = true;
+              if (processParagraph(owner, p, rowCat, loc, { wholeTodo: false })) changed = true;
             });
           });
         });
@@ -232,7 +353,7 @@
     if (options.updateFields) await D.setUpdateFields(zip);
     const data = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     diffs.forEach((d, i) => (d.no = i + 1));
-    return { data, diffs, riskFixed, removedCapNos: [...removedCapNos], commentCount: comments.items.length };
+    return { data, diffs, riskFixed, removedCapNos: [...removedCapNos], commentCount: comments.items.length, stats };
   };
 
   /* 還原測試：比對產出與母本（已知錯字自動更正後）的逐字相同比例 */

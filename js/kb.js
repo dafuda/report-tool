@@ -83,7 +83,9 @@
           cat = 'C';
           reason = '出現條件關鍵字';
         } else if (hasFact) {
-          cat = b.kind === 'p' && b.text.length < 40 ? 'F' : 'M';
+          // 很短、或「欄位：值」形式的段落視為 F（整段都是事實）；完整句子視為 M（句型中嵌入事實）
+          const t = b.text.trim();
+          cat = b.kind === 'p' && (t.length < 25 || (t.length < 60 && /^[^：:，。]{1,15}[：:]/.test(t))) ? 'F' : 'M';
           reason = hasLit ? `含母本專案事實「${hasLit}」` : '含數值、日期或地號等專案事實';
         } else {
           reason = '未偵測到專案事實或條件';

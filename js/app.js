@@ -14,7 +14,7 @@
     overrides: {},
     planOverrides: {},
     manualTags: {},
-    options: { clean: false, autoFix: true, recomputeRisk: true, updateFields: true },
+    options: { clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true },
     confirmed: false,
     masterSig: '',
     projectName: '新案A',
@@ -43,7 +43,7 @@
     const base = RG.newFacts();
     for (const k of Object.keys(base)) S.facts[k] = Object.assign(base[k], S.facts[k] || {});
     S.rules = Object.assign(RG.clone(RG.DEFAULT_RULES), S.rules || {});
-    S.options = Object.assign({ clean: false, autoFix: true, recomputeRisk: true, updateFields: true }, S.options || {});
+    S.options = Object.assign({ clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true }, S.options || {});
   }
   try {
     applyLoaded(JSON.parse(localStorage.getItem(STORE_KEY) || 'null'));
@@ -288,6 +288,7 @@
   function viewClassify() {
     const wrap = h('div', {}, h('h1', { class: 'view-title' }, '2 分類與標籤確認'),
       h('p', { class: 'view-desc' }, '每個段落與表格都先由工具初判為 F 專案事實、T 通用範本、C 條件式、M 混合，並標上適用條件標籤。請確認或修改（只確認有疑義的也可以）。修改過的列會以淺黃底顯示。'));
+    wrap.appendChild(classifyLegend());
     if (!S.master) return wrap.appendChild(needMaster()), wrap;
     const f = S.ui.cls;
     const blocks = S.master.blocks.filter((b) => !['empty', 'other'].includes(b.kind));
@@ -348,13 +349,26 @@
         h('td', {}, h('div', { class: 'clamp', title: '點一下展開／收合', onclick: (ev) => ev.currentTarget.classList.toggle('open') }, b.kind === 'rows' ? b.title + '\n' + b.text : b.text || '（空白）')),
         h('td', {}, h('span', { class: 'badge cat cat-' + b.auto.cat }, b.auto.cat), ' ', b.auto.tags.map((t) => h('span', { class: 'badge tag' }, t)), h('div', { class: 'reason' }, b.auto.reason)),
         h('td', {}, h('select', { onchange: (ev) => setO({ cat: ev.target.value }) }, Object.keys(K.CATS).map((c) => h('option', { value: c, selected: e.cat === c }, `${c} ${K.CATS[c]}`)))),
-        h('td', {}, h('input', { type: 'text', value: e.tags.join('、'), placeholder: '例：擋土柱+斜撐、地下1層', style: { width: '200px' }, onchange: (ev) => setO({ tags: ev.target.value.split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean) }) }),
+        h('td', {}, h('input', { type: 'text', value: e.tags.join('、'), placeholder: e.cat === 'C' ? '例：擋土柱+斜撐、地下1層' : '僅 C 類使用', title: e.cat === 'C' ? '新案必須具備全部標籤，這段才會保留' : '只有 C 條件式會用到標籤；此分類填了也不影響產出', style: { width: '200px', opacity: e.cat === 'C' ? 1 : 0.5 }, onchange: (ev) => setO({ tags: ev.target.value.split(/[、,，;；]+/).map((s) => s.trim()).filter(Boolean) }) }),
           o ? h('div', {}, h('button', { class: 'btn small', onclick: () => { delete S.overrides[b.id]; save(); render(); } }, '還原自動判斷')) : null));
     });
     wrap.appendChild(h('div', { class: 'card' },
       h('div', { class: 'tbl-wrap' }, h('table', { class: 'data' }, h('thead', {}, h('tr', {}, ['區塊', '類型', '內容', '自動判斷', '確認分類', '確認標籤'].map((x) => h('th', {}, x)))), h('tbody', {}, rows))),
       pager(f, pages, list.length)));
     return wrap;
+  }
+  function classifyLegend() {
+    const row = (c, what, result) => h('tr', {}, h('td', {}, h('span', { class: 'badge cat cat-' + c }, c), ' ', K.CATS[c]), h('td', {}, what), h('td', {}, result));
+    return h('details', { class: 'card', open: !S.master || !Object.keys(S.overrides).length },
+      h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '分類代號與「確認標籤」說明'),
+      h('table', { class: 'data', style: { marginTop: '10px' } },
+        h('thead', {}, h('tr', {}, h('th', {}, '分類'), h('th', {}, '指的是'), h('th', {}, '產出時的處理'))),
+        h('tbody', {},
+          row('F', '只屬於本案的資料：工程名稱、地址、面積、日期、人員、表1-1 等', '有設定母本寫法的欄位 → 換成新案值；整段（表格為整格）找不到任何對應欄位 → 改為紅字【待填】，絕不帶入母本數字'),
+          row('T', '與案子無關的通用文字：前言、方法說明、法規、災害案例、風險矩陣', '原文照抄，不替換專案事實；只做已知錯字更正'),
+          row('C', '依構造、工項、環境條件決定是否出現：擋土、開挖、電梯、骨櫃…', '「確認標籤」全部符合新案條件才保留（並替換其中的專案事實），否則整段／整表刪除'),
+          row('M', '固定句型中嵌入專案事實：「本案為地下1層、地上4層RC造…」', '只替換句中的專案事實、保留句型；若替換後可能不通（如地下0層）或句中提到新案沒有的工項 → 淺藍底＋註解「待審」'))),
+      h('div', { class: 'muted', style: { marginTop: '8px' } }, '確認標籤：只有 C 類會用到。填寫這段內容適用的條件（以頓號分隔），新案必須「全部」具備才保留；例如「擋土柱+斜撐、地下1層」表示有地下室且採擋土柱工法的案子才會出現。新案具備哪些標籤，在「3 專案資料」最下方決定。F／T／M 類填了標籤不會有作用。'));
   }
   function pager(f, pages, total) {
     return h('div', { class: 'pager' },
@@ -700,11 +714,11 @@
   /* ====================================================================
    * 5. 產出
    * ==================================================================== */
-  const TYPE_COLORS = { 沿用母本: '#8a94a8', 新案資料填入: '#1f5fbf', 待填: '#c62828', 自動更正: '#0f7f7a', 母本疑義: '#e08a00', 已刪除: '#5a3d8a', 自動計算風險值: '#2e9b5f' };
+  const TYPE_COLORS = { 沿用母本: '#8a94a8', 新案資料填入: '#1f5fbf', 待填: '#c62828', 待審: '#2b7bb9', 自動更正: '#0f7f7a', 母本疑義: '#e08a00', 已刪除: '#5a3d8a', 自動計算風險值: '#2e9b5f' };
   async function doGenerate() {
     await busy('產出報告中…', async () => {
       const res = planRes();
-      const out = await RG.gen.generate(S.master.buffer, { blocks: S.master.blocks, overrides: S.overrides, facts: S.facts, rules: S.rules, options: S.options, planRes: res });
+      const out = await RG.gen.generate(S.master.buffer, { blocks: S.master.blocks, overrides: S.overrides, facts: S.facts, rules: S.rules, options: S.options, planRes: res, tagSet: tagInfo().set });
       const { doc, styles } = await D.load(out.data);
       out.blocks = D.parseBlocks(doc, styles);
       out.name = `${S.projectName}_報告書.docx`;
@@ -718,10 +732,10 @@
       const facts = RG.clone(S.facts);
       Object.values(facts).forEach((f) => (f.newValue = f.masterValue));
       const res = K.plan(S.master.blocks, S.overrides, new Set(), {}, { keepAll: true });
-      const out = await RG.gen.generate(S.master.buffer, { blocks: S.master.blocks, overrides: S.overrides, facts, rules: S.rules, options: { clean: true, autoFix: true, recomputeRisk: false, updateFields: true }, planRes: res });
+      const out = await RG.gen.generate(S.master.buffer, { blocks: S.master.blocks, overrides: S.overrides, facts, rules: S.rules, options: { clean: true, autoFix: true, recomputeRisk: false, updateFields: true, fillMissingF: false, markReview: false }, planRes: res });
       const { doc, styles } = await D.load(out.data);
       const blocks = D.parseBlocks(doc, styles);
-      S.restore = Object.assign(RG.gen.compareRestore(S.master.blocks, blocks, S.rules), { data: out.data });
+      S.restore = Object.assign(RG.gen.compareRestore(S.master.blocks, blocks, S.rules), { data: out.data, uncoveredF: out.stats.uncoveredF });
       render();
     });
   }
@@ -749,7 +763,9 @@
     const opt = (k, label, desc) => h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: S.options[k], onchange: (e) => { S.options[k] = e.target.checked; invalidateOutputs(); save(); } }), h('span', {}, h('b', {}, label), h('span', { class: 'muted' }, desc)));
     wrap.appendChild(h('div', { class: 'grid2' },
       h('div', { class: 'card' }, h('h2', {}, '產出選項'),
-        opt('clean', '乾淨版（--clean）', '不加母本疑義的橘底與註解；【待填】紅字仍保留，以免遺漏'),
+        opt('clean', '乾淨版（--clean）', '不加母本疑義的橘底、待審的淺藍底與註解；【待填】紅字仍保留，以免遺漏'),
+        opt('fillMissingF', 'F 類找不到新案值時整段／整格標【待填】', '關閉時 F 類只替換有設定的欄位，其餘沿用母本原文（可能殘留母本數字）'),
+        opt('markReview', 'M 類句型需改寫時標「待審」', '例如新案地下層數為 0、句中提到新案沒有的工項；以淺藍底＋Word 註解標示，並列入差異清單'),
         opt('autoFix', '自動更正已知錯字', '依「規則設定」的自動更正清單，例如「生方向指示燈」→「逃生方向指示燈」'),
         opt('recomputeRisk', '自動計算風險值', '依風險矩陣（可能性 × 嚴重度）重算風險值與 H／M／L 等級'),
         opt('updateFields', '開檔時更新功能變數', '在 settings.xml 設定 updateFields，Word 開檔會詢問是否更新目錄')),
@@ -767,6 +783,7 @@
       const pass = r.ratio >= 0.98 && r.tablesMaster === r.tablesOut && r.chaptersMaster === r.chaptersOut;
       wrap.appendChild(h('div', { class: 'card' }, h('h2', {}, '還原測試結果'),
         h('div', { class: 'note ' + (pass ? 'ok' : 'bad') }, pass ? '通過：正文段落與表格儲存格 ≥ 98% 逐字相同，表格數與章數相同。' : '未通過，請檢查下列差異。'),
+        r.uncoveredF ? h('div', { class: 'note warn' }, `有 ${r.uncoveredF} 段／格 F 專案事實沒有對應到任何欄位的母本寫法。還原測試中先沿用原文；正式產出時會標成【待填】。請到「3 專案資料」補齊母本設定，或把這些內容改分類為 T。`) : null,
         h('div', { class: 'kpis' },
           h('div', { class: 'kpi' }, h('div', { class: 'k' }, '逐字相同'), h('div', { class: 'v' }, (r.ratio * 100).toFixed(2) + '%'), h('div', { class: 's' }, `${r.same} / ${r.total} 單位`)),
           h('div', { class: 'kpi' }, h('div', { class: 'k' }, '表格數'), h('div', { class: 'v' }, `${r.tablesOut} / ${r.tablesMaster}`)),
@@ -787,7 +804,7 @@
           h('button', { class: 'btn', onclick: exportDiff }, '下載差異清單 .xlsx'),
           h('button', { class: 'btn', onclick: () => { runCheck(o.blocks, '產出檔：' + o.name, false); go('check'); } }, '對產出檔執行一致性檢查')),
         h('div', { class: 'kpis', style: { marginTop: '12px' } },
-          ...['沿用母本', '新案資料填入', '待填', '自動更正', '母本疑義', '已刪除', '自動計算風險值'].map((t) => h('div', { class: 'kpi' + (t === '待填' && count(t) ? ' warn' : '') }, h('div', { class: 'k' }, t), h('div', { class: 'v' }, count(t))))),
+          ...['沿用母本', '新案資料填入', '待填', '待審', '自動更正', '母本疑義', '已刪除', '自動計算風險值'].map((t) => h('div', { class: 'kpi' + (['待填', '待審'].includes(t) && count(t) ? ' warn' : '') }, h('div', { class: 'k' }, t), h('div', { class: 'v' }, count(t))))),
         h('h2', { style: { marginTop: '16px' } }, '各章來源統計'),
         h('div', { class: 'bars' }, st.chapters.map((c) => {
           const tot = st.types.reduce((n, t) => n + (st.m[c][t] || 0), 0);
@@ -854,6 +871,7 @@
       ['templateSections', '視為通用範本的節名（正規表示式）', ''],
       ['templateCaptions', '視為通用範本的表名（正規表示式）', ''],
       ['factTableCaptions', '視為專案事實表的表名（正規表示式）', ''],
+      ['factValueHeaders', 'F 專案事實表的「值」欄表頭（正規表示式）', '表頭符合的欄位，找不到新案值時整格標【待填】；都不符合時以最後一欄為值欄'],
       ['refTableCaption', '表5-1（依實際表格同步）的表名（正規表示式）', ''],
     ];
     for (const [key, title, hint] of items) {
@@ -892,6 +910,7 @@
         step(6, '一致性檢查', '檢查產出檔是否有跨章節矛盾、母本殘留、待填項目等。'))),
       h('div', { class: 'card' }, h('h2', {}, '文件中的標示'), h('ul', { class: 'checklist' },
         h('li', {}, h('span', { style: { color: '#c00', fontWeight: 700 } }, '紅字【待填：欄位】'), '　新案資料沒有提供的專案事實'),
+        h('li', {}, h('span', { style: { background: '#DDEBF7', padding: '0 4px' } }, '淺藍底＋註解「待審」'), '　M 類替換後句型可能不通，需人工改寫（乾淨版不標示）'),
         h('li', {}, h('span', { style: { background: '#FFC000', padding: '0 4px' } }, '橘底＋註解'), '　母本疑義（乾淨版不標示）'),
         h('li', {}, h('span', {}, '沿用母本、新案資料填入、自動更正'), '　文件中不標示，請看差異清單'))),
       h('div', { class: 'card' }, h('h2', {}, '這個網頁版目前的範圍'), h('ul', { class: 'checklist' },

@@ -113,6 +113,8 @@ const ok = (cond, msg) => {
       text: B.map((b) => b.text).join('\n'),
       caps: B.filter((b) => b.kind === 'caption').map((b) => b.text),
       types: o.diffs.reduce((m, d) => ((m[d.type] = (m[d.type] || 0) + 1), m), {}),
+      review: o.diffs.filter((d) => d.type === '待審').map((d) => d.reason),
+      fTodo: o.diffs.filter((d) => d.type === '待填' && d.reason.startsWith('F 專案事實')).map((d) => d.after),
       removed: o.removedCapNos,
     };
   });
@@ -129,6 +131,12 @@ const ok = (cond, msg) => {
   ok(outInfo.text.includes('【待填：地址】') && !outInfo.text.includes('松竹路'), '未提供的地址標為待填，不帶入母本值');
   ok(outInfo.text.includes('逃生方向指示燈'), '錯字已自動更正');
   ok(!outInfo.text.includes('代辨機關'), '代辨機關已更正');
+  console.log('review', JSON.stringify(outInfo.review));
+  console.log('fTodo', JSON.stringify(outInfo.fTodo));
+  ok(outInfo.review.some((r) => r.includes('地下層數') && r.includes('0')), 'M 類：地下層數為 0 時標「待審」');
+  ok(outInfo.fTodo.includes('【待填：專案事實】'), 'F 類：沒有對應欄位的段落整段標【待填】');
+  ok(!outInfo.text.includes('115年6月'), 'F 類：母本日期不帶入新案');
+  ok(outInfo.text.includes('本案為新竹縣竹北市虛構活動中心新建工程'), 'M 類：句型保留');
 
   // 產出檔檢查
   await page.click('button:has-text("對產出檔執行一致性檢查")');

@@ -182,8 +182,10 @@
     const runs = D.runsOf(p);
     const rPr = runs.length ? D.kid(runs[0], 'rPr') : null;
     runs.forEach((r) => r.parentNode.removeChild(r));
-    p.appendChild(D.makeRun(p.ownerDocument, rPr, text));
+    const nr = D.makeRun(p.ownerDocument, rPr, text);
+    p.appendChild(nr);
     for (const q of ps.slice(1)) D.runsOf(q).forEach((r) => r.parentNode.removeChild(r));
+    return nr;
   };
 
   /* ---------- 字元格式（rPr 子元素需依 schema 順序） ---------- */
@@ -214,6 +216,7 @@
     issue: { shd: 'FFC000' }, // 母本疑義：橘底
     library: { shd: 'C6EFCE' }, // 取自資料庫：淺綠底
     draft: { highlight: 'yellow' }, // Claude 起草：黃底
+    review: { shd: 'DDEBF7' }, // 待審（M 類句型需改寫）：淺藍底
   };
   D.markRun = function (r, mark) {
     const m = D.MARKS[mark];
