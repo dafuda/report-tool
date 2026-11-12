@@ -39,6 +39,25 @@ const ok = (c, m) => {
   await page.click('button:has-text("關閉提示")');
   ok(!/分類原則已更新/.test(await page.textContent('main')), '關閉提示後不再顯示');
 
+  // ---------- 1b. 前置頁：內容 F、頁面標題 T ----------
+  const front = await page.evaluate(() => Object.fromEntries(RG.app.S.master.blocks.filter((b) => b.chapter === '前置' && b.kind === 'p').map((b) => [b.text.trim(), b.auto.cat])));
+  console.log(JSON.stringify(front));
+  ok(front['設計階段施工風險評估報告'] === 'T', '前置頁的頁面標題（…風險評估報告）沿用 T');
+  ok(front['中華民國115年6月'] === 'F' && front['代辨機關：臺中市政府'] === 'F', '前置頁的日期、機關等內容為 F');
+  // 已存的章節原則（更新前）會自動補上「前置」
+  const upgraded = await page.evaluate(() => {
+    const st = JSON.parse(localStorage.getItem('rg-report-tool-v1'));
+    st.rules.sectionPolicy = st.rules.sectionPolicy.filter((r) => !r.chapter.includes('前置'));
+    delete st.rules.sectionPolicyRev;
+    localStorage.setItem('rg-report-tool-v1', JSON.stringify(st));
+    return true;
+  });
+  await page.reload();
+  const sp = await page.evaluate(() => RG.app.S.rules.sectionPolicy.map((r) => r.chapter));
+  ok(upgraded && sp[0] === '前置', '已存的章節原則會自動補上「前置」');
+  await page.setInputFiles('.dropzone input[type=file]', path.join(__dirname, 'fixtures', 'sample_master.docx'));
+  await page.waitForFunction(() => RG.app.S.master);
+
   // ---------- 2. 各章工項連動、標題隨內容刪除 ----------
   const plan = (po) => page.evaluate((po) => {
     const S = RG.app.S;

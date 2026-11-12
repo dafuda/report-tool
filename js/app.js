@@ -46,7 +46,15 @@
     for (const k of PERSIST) if (o[k] !== undefined) S[k] = o[k];
     const base = RG.newFacts();
     for (const k of Object.keys(base)) S.facts[k] = Object.assign(base[k], S.facts[k] || {});
+    const storedRev = (S.rules && S.rules.sectionPolicy && S.rules.sectionPolicyRev) || (S.rules && S.rules.sectionPolicy ? 1 : 2);
     S.rules = Object.assign(RG.clone(RG.DEFAULT_RULES), S.rules || {});
+    // 規則更新：已存的章節原則補上「前置」（保留使用者其他修改）
+    if (storedRev < 2) {
+      const sp = Array.isArray(S.rules.sectionPolicy) ? S.rules.sectionPolicy : [];
+      if (!sp.some((r) => String(r.chapter || '').includes('前置'))) sp.unshift(RG.clone(RG.DEFAULT_RULES.sectionPolicy[0]));
+      S.rules.sectionPolicy = sp;
+      S.rules.sectionPolicyRev = 2;
+    }
     S.options = Object.assign({ clean: false, autoFix: true, recomputeRisk: true, updateFields: true, fillMissingF: true, markReview: true, figurePlaceholder: true }, S.options || {});
   }
   try {
@@ -1942,6 +1950,7 @@
       ['factTableCaptions', '視為專案事實表的表名（正規表示式）', ''],
       ['figureFactCaptions', '視為 F 專案圖的圖名／表名（正規表示式）', '圖片或表格截圖的名稱符合時，產出換成【待補圖】；沒有名稱或都不符合時也預設為 F'],
       ['figureTemplateCaptions', '視為 T 通用圖的圖名（正規表示式）', '符合時沿用原圖；出現條件關鍵字的圖會判為 C'],
+      ['frontTitles', '前置頁的頁面標題（正規表示式）', '前置頁整段符合時視為頁面標題（T 沿用），例如「設計階段施工風險評估報告」「修正一覽表」「目錄」；其他前置頁內容依章節原則為 F'],
       ['tableLabelHeaders', 'F 專案事實表的左側表頭（正規表示式）', '表頭（第 1 列）符合這些字的欄位視為左側表頭，沿用不改；第 1 欄一律視為表頭；其餘儲存格改為待填'],
       ['refTableCaption', '表5-1（依實際表格同步）的表名（正規表示式）', ''],
     ];
@@ -1955,7 +1964,7 @@
               S.rules[key] = isStr ? ta.value.trim() : JSON.parse(ta.value);
               save();
               invalidateOutputs();
-              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions', 'figureFactCaptions', 'figureTemplateCaptions', 'sectionPolicy'].includes(key)) reclassifyKeepMemory();
+              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions', 'figureFactCaptions', 'figureTemplateCaptions', 'sectionPolicy', 'frontTitles'].includes(key)) reclassifyKeepMemory();
               toast('已儲存：' + title, 'ok');
             } catch (e) {
               toast('JSON 格式錯誤：' + e.message, 'bad');

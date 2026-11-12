@@ -163,6 +163,9 @@
           const { keepLen, label } = fPrefix();
           if (keepLen >= before.trimEnd().length) return false; // 只有編號或「欄位：」，沒有內容
           D.replaceInParagraph(p, [{ start: keepLen, end: before.trimEnd().length, repl: `【待填：${label}】`, mark: 'todo' }]);
+          const pre = D.paraText(p);
+          const fixes = match(pre, false).filter((m) => m.type === '自動更正');
+          if (fixes.length) D.replaceInParagraph(p, fixes);
           if (!opts.silent) stats.fTodo++;
           record(b, loc, '待填', '母本 ' + b.id, before, D.paraText(p), 'F 專案事實：整段改為待填（母本原文見左欄，不帶入新案）', true);
           return true;

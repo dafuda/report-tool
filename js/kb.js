@@ -65,6 +65,7 @@
     const factCap = safeRe(rules.factTableCaptions || '(?!)');
     const figFact = safeRe(rules.figureFactCaptions || '(?!)');
     const figTpl = safeRe(rules.figureTemplateCaptions || '(?!)');
+    const frontT = safeRe(rules.frontTitles || '(?!)');
     const lits = [];
     for (const f of Object.values(facts || {})) lits.push(...RG.literalsOf(f));
     const byId = Object.fromEntries(blocks.map((b) => [b.id, b]));
@@ -112,6 +113,9 @@
         if ((b.kind === 'p' || b.kind === 'sdt') && /[：:]$/.test(t) && t.length <= 80) {
           cat = 'T';
           reason = '結尾為「：」的引導句（結構）';
+        } else if (b.chapter === '前置' && (b.kind === 'p' || b.kind === 'sdt') && frontT && frontT.test(t)) {
+          cat = 'T';
+          reason = '前置頁的頁面標題（結構）';
         } else if (forcedT || (tplCap && cap && tplCap.test(cap))) {
           cat = 'T';
           reason = forcedT ? `${polText}：沿用` : '通用範本表格（風險矩陣、分級等）';
