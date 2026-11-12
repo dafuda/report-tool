@@ -3,6 +3,7 @@
   'use strict';
   const RG = (window.RG = window.RG || {});
   const K = (RG.kb = {});
+  const D = { isLevel5: (t) => RG.docx.isLevel5(t) };
 
   K.CATS = {
     F: '專案事實',
@@ -43,33 +44,53 @@
 
   const FACT_RE = /(\d[\d,.]*\s*(m²|㎡|m2|平方公尺|公頃|毫米|mm|公釐|°C|℃|[%％]))|地號|\d{2,3}\s*年\s*\d{1,2}\s*月|電話|TEL/i;
 
-  /* 初判分類與標籤，結果寫在 b.auto */
+  /* 章節原則：回傳 { body: 'F'|'T'|'auto', note } */
+  K.policyOf = function (b, rules) {
+    for (const r of rules.sectionPolicy || []) {
+      const chs = String(r.chapter || '').split(/[,，、]/).map((x) => x.trim()).filter(Boolean);
+      if (!chs.includes(b.chapter)) continue;
+      const secs = String(r.sections || '*').trim();
+      if (secs !== '*' && !secs.split(/[,，、]/).map((x) => parseInt(x, 10)).includes(b.secNo || 0)) continue;
+      return { body: r.body || 'auto', note: r.note || '' };
+    }
+    return { body: 'auto', note: '' };
+  };
+  const where = (b) => `${b.chapter}${b.secNo ? '第' + b.secNo + '節' : ''}`;
+
+  /* 初判分類與標籤（由大到小）：結構 → 章節原則 → 條件標籤／專案事實；結果寫在 b.auto */
   K.classify = function (blocks, rules, facts) {
     const kw = K.compileKeywords(rules.tagKeywords);
     const tplSec = safeRe(rules.templateSections || '(?!)');
     const tplCap = safeRe(rules.templateCaptions || '(?!)');
     const factCap = safeRe(rules.factTableCaptions || '(?!)');
+    const figFact = safeRe(rules.figureFactCaptions || '(?!)');
+    const figTpl = safeRe(rules.figureTemplateCaptions || '(?!)');
     const lits = [];
     for (const f of Object.values(facts || {})) lits.push(...RG.literalsOf(f));
     const byId = Object.fromEntries(blocks.map((b) => [b.id, b]));
     const captionText = (b) => (b.captionId && byId[b.captionId] ? byId[b.captionId].text : '');
+    const stripLits = (s) => lits.reduce((t, l) => t.split(l).join(' '), s);
+    const tagsOf = (s) => kw.filter((k) => k.re.test(stripLits(s))).map((k) => k.tag);
 
-    const figFact = safeRe(rules.figureFactCaptions || '(?!)');
-    const figTpl = safeRe(rules.figureTemplateCaptions || '(?!)');
     for (const b of blocks) {
       let cat = 'T';
       let tags = [];
       let reason = '';
+      const pol = K.policyOf(b.parentId ? byId[b.parentId] : b, rules);
+      const polText = `${where(b)}${pol.note ? '（' + pol.note + '）' : ''}`;
+      const forcedT = (tplSec && tplSec.test(b.section || '')) || pol.body === 'T';
+
       if (b.kind === 'figure') {
-        // 圖片（含以截圖呈現的表格）：依圖名／表名判斷
+        // 圖片（含表格截圖）：依圖名／表名辨別
         const name = b.capName || '';
-        let nm = name;
-        for (const l of lits) nm = nm.split(l).join(' ');
         const what = b.capType === '表' ? '表格截圖' : '圖';
-        if (name && figFact && figFact.test(name)) {
+        if (forcedT) {
+          cat = 'T';
+          reason = `${polText}：沿用`;
+        } else if (name && figFact && figFact.test(name)) {
           cat = 'F';
-          reason = `${what}名含專案相關字詞，視為專案圖（產出時換成待補圖）`;
-        } else if (name && b.chapter !== '前置' && (tags = kw.filter((k) => k.re.test(nm)).map((k) => k.tag)).length) {
+          reason = `${what}名含專案相關字詞 → 專案圖（圖片換成【待補圖】、${what}名改待填）`;
+        } else if (name && pol.body === 'auto' && b.chapter !== '前置' && (tags = tagsOf(name)).length) {
           cat = 'C';
           reason = `${what}名出現條件關鍵字`;
         } else if (name && figTpl && figTpl.test(name)) {
@@ -77,42 +98,45 @@
           reason = `${what}名為流程、架構、示意等通用圖`;
         } else {
           cat = 'F';
-          reason = name ? `無法從${what}名判斷，預設視為專案圖；若為通用圖請改 T` : `沒有${what}名，預設視為專案圖；若為通用圖請改 T`;
+          reason = name ? `無法從${what}名判斷，預設為專案圖；若為通用圖請改 T` : `沒有${what}名，預設為專案圖；若為通用圖請改 T`;
         }
-        b.auto = { cat, tags, reason };
-        continue;
-      }
-      if (['heading', 'caption', 'toc', 'empty', 'other'].includes(b.kind)) {
-        reason = '結構元素（標題／表名／目錄等）';
+      } else if (b.kind === 'heading') {
+        reason = `標題第 ${b.level || ''} 階（結構）`;
+      } else if (['caption', 'toc', 'empty', 'other'].includes(b.kind)) {
+        reason = b.kind === 'toc' ? '目錄（結構）' : b.kind === 'caption' ? '表名／圖名：依所屬表格或圖片的分類處理' : '結構元素';
       } else {
-        let tagText = b.text;
-        if (b.kind === 'table') tagText = captionText(b) + '\n' + (b.rows || []).slice(0, 3).map((r) => r.join(' ')).join('\n');
-        if (b.kind === 'rows') tagText = b.tagText;
-        // 專案事實本身（如工程名稱含「納骨塔」、「RC造」）不算條件關鍵字，先移除再比對
-        for (const l of lits) tagText = tagText.split(l).join(' ');
+        const t = (b.text || '').trim();
         const cap = b.capName || '';
-        const forcedT = (tplSec && tplSec.test(b.section || '')) || (tplCap && cap && tplCap.test(cap));
-        if (!forcedT && b.chapter !== '前置' && !(b.kind === 'table' && b.groups)) {
-          for (const k of kw) if (k.re.test(tagText)) tags.push(k.tag);
-        }
         const hasLit = lits.find((l) => b.text.includes(l));
         const hasFact = !!hasLit || FACT_RE.test(b.text);
-        if (forcedT) {
+        if ((b.kind === 'p' || b.kind === 'sdt') && /[：:]$/.test(t) && t.length <= 80) {
           cat = 'T';
-          reason = '通用範本章節或表格（法規／案例／風險矩陣）';
+          reason = '結尾為「：」的引導句（結構）';
+        } else if (forcedT || (tplCap && cap && tplCap.test(cap))) {
+          cat = 'T';
+          reason = forcedT ? `${polText}：沿用` : '通用範本表格（風險矩陣、分級等）';
         } else if (b.kind === 'table' && factCap && cap && factCap.test(cap)) {
           cat = 'F';
-          reason = '專案事實表：' + cap;
-        } else if (tags.length) {
-          cat = 'C';
-          reason = '出現條件關鍵字';
-        } else if (hasFact) {
-          // 很短、或「欄位：值」形式的段落視為 F（整段都是事實）；完整句子視為 M（句型中嵌入事實）
-          const t = b.text.trim();
-          cat = b.kind === 'p' && (t.length < 25 || (t.length < 60 && /^[^：:，。]{1,15}[：:]/.test(t))) ? 'F' : 'M';
-          reason = hasLit ? `含母本專案事實「${hasLit}」` : '含數值、日期或地號等專案事實';
+          reason = `專案事實表「${cap}」：表頭沿用、內容待填`;
+        } else if (pol.body === 'F') {
+          cat = 'F';
+          if (b.kind === 'table' || b.kind === 'rows') reason = `${polText}：表格內容為專案事實（表頭沿用、內容待填）`;
+          else reason = `${polText}：${D.isLevel5(t) ? '第五階以後的' : ''}內文為專案事實（整段待填）`;
         } else {
-          reason = '未偵測到專案事實或條件';
+          // auto：重複格式的表格與內文，依條件標籤與專案事實判斷
+          let tagText = b.text;
+          if (b.kind === 'table') tagText = captionText(b) + '\n' + (b.rows || []).slice(0, 3).map((r) => r.join(' ')).join('\n');
+          if (b.kind === 'rows') tagText = b.tagText;
+          if (b.chapter !== '前置' && !(b.kind === 'table' && b.groups)) tags = tagsOf(tagText);
+          if (tags.length) {
+            cat = 'C';
+            reason = '出現條件關鍵字';
+          } else if (hasFact) {
+            cat = b.kind === 'p' && (t.length < 25 || (t.length < 60 && /^[^：:，。]{1,15}[：:]/.test(t))) ? 'F' : 'M';
+            reason = hasLit ? `含母本專案事實「${hasLit}」` : '含數值、日期或地號等專案事實';
+          } else {
+            reason = b.chapter === '前置' ? '前置頁：未偵測到專案事實' : '未偵測到專案事實或條件';
+          }
         }
       }
       b.auto = { cat, tags, reason };
@@ -161,7 +185,26 @@
   };
 
   /* 工項規劃：決定每個區塊保留或刪除 */
+  /* ---------- 工項名稱（第三～五章前後對照用） ---------- */
+  const ITEM_SUFFIX = /(之)?(設計方案評選表|工程規劃階段風險辨識表|規劃階段風險辨識表|風險辨識表|作業拆解表|設計階段施工風險評估表|施工風險評估表|風險評估表|風險資訊傳遞表|風險處理追蹤管制表|評選表|拆解表|一覽表|統計表)$/;
+  K.itemName = function (b) {
+    if (b.kind === 'rows') return String(b.title || '').replace(/^\s*分項工程\s*[：:]\s*/, '').replace(/^[（(]?[A-Za-zＡ-Ｚ0-9０-９]{1,2}[）).、．\s]+/, '').trim();
+    if ((b.kind === 'table' || b.kind === 'figure') && b.capName && ITEM_SUFFIX.test(b.capName)) return b.capName.replace(ITEM_SUFFIX, '').trim();
+    return '';
+  };
+  K.itemCore = (name) => {
+    let n = String(name || '').replace(/[\s　]/g, '');
+    for (let i = 0; i < 2; i++) n = n.replace(/(工程|作業|設施|施工|工項|項目|組立|系統)$/, '');
+    return n;
+  };
+  K.itemMatch = (a, b) => {
+    const x = K.itemCore(a);
+    const y = K.itemCore(b);
+    return x.length >= 2 && y.length >= 2 && (x === y || x.includes(y) || y.includes(x));
+  };
+
   K.plan = function (blocks, overrides, tagSet, planOverrides, opts = {}) {
+    const linkChs = String(opts.linkChapters || '第三章,第四章,第五章').split(/[,，、]/).map((x) => x.trim());
     const res = {};
     const byId = Object.fromEntries(blocks.map((b) => [b.id, b]));
     const decide = (b) => {
@@ -178,6 +221,16 @@
       return { include: true, reason: '' };
     };
     for (const b of blocks) if (!b.linkTo) res[b.id] = decide(b);
+    // 各章工項連動：第三～五章某工項被刪除 → 其他章同名工項的表格、子表格一起刪除
+    if (!opts.keepAll) {
+      const items = blocks.filter((b) => linkChs.includes(b.chapter) && res[b.id] && K.itemName(b));
+      const dropped = items.filter((b) => !res[b.id].include);
+      for (const b of items) {
+        if (!res[b.id].include || res[b.id].user) continue;
+        const src = dropped.find((d) => d.chapter !== b.chapter && K.itemMatch(K.itemName(d), K.itemName(b)));
+        if (src) res[b.id] = { include: false, reason: `隨${src.chapter}「${K.itemName(src)}」刪除（各章工項連動）`, linked: true };
+      }
+    }
     // 子表格全刪 → 整張表刪
     for (const b of blocks) {
       if (b.kind === 'table' && b.groups && res[b.id].include && !res[b.id].user) {
@@ -204,6 +257,20 @@
         const t = byId[b.linkTo];
         if (t.captionId && !(planOverrides || {})[t.captionId]) res[t.captionId] = { include: false, reason: '隨表格刪除' };
       }
+    }
+    // 第三階「一、」、第四階「（一）」標題：底下內容全部刪除 → 標題也刪除
+    const top = blocks.filter((b) => !b.parentId);
+    for (let i = top.length - 1; i >= 0; i--) {
+      // 由下往上處理，先決定內層（（一））再決定外層（一、）
+      const b = top[i];
+      if (b.kind !== 'heading' || !(b.level >= 3) || (planOverrides || {})[b.id]) continue;
+      const body = [];
+      for (let j = i + 1; j < top.length; j++) {
+        const x = top[j];
+        if (x.kind === 'heading' && (x.level || 9) <= b.level) break;
+        if (!['empty', 'other'].includes(x.kind)) body.push(x);
+      }
+      if (body.length && body.every((x) => !res[x.id].include)) res[b.id] = { include: false, reason: '標題底下的內容全部刪除' };
     }
     return res;
   };

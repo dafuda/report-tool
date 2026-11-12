@@ -7,7 +7,9 @@
 
   M.KINDS = ['p', 'table', 'rows', 'sdt', 'figure'];
   M.HEAD = 600; // 模糊比對只用正規化後前 600 字
-  M.empty = () => ({ version: 1, threshold: 0.9, entries: {} });
+  /* classifyVersion：分類原則的版本；原則大改時，舊版本的記憶不再沿用 */
+  M.CLASSIFY_VERSION = 2;
+  M.empty = () => ({ version: 1, classifyVersion: M.CLASSIFY_VERSION, threshold: 0.9, entries: {} });
 
   /* 換行（表格的列、段內換行）保留為「|」分隔，其餘空白移除；避免前一列結尾與下一列開頭黏成一個詞 */
   M.norm = (s) => String(s || '').normalize('NFKC').replace(/\s*\n\s*/g, '|').replace(/\s+/g, '');

@@ -98,26 +98,29 @@ def main(out, v2=False):
     doc.add_paragraph("代辨機關：臺中市政府")
     doc.add_section(WD_SECTION.NEW_PAGE)
 
-    # 第一章
+    # 第一章（第一～四節：內文與表格內容預設 F）
     doc.add_paragraph("第一章 工程計畫概要", style="章節")
     doc.add_paragraph("一、計畫緣起與目標", style="1-1")
+    doc.add_paragraph("（一）計畫緣起")
     if v2:
         doc.add_paragraph("本計畫配合市府殯葬設施整體規劃辦理，期提升納骨空間之使用效率。")
     doc.add_paragraph("本案為臺中市北屯區第28公墓新建納骨塔工程，地下1層、地上4層RC造建築物。")
     if not v2:
         doc.add_paragraph("地下停車場出入口由國豐街253巷進、出。")
+    doc.add_paragraph("本計畫目標如下：")
+    doc.add_paragraph("1. 提供北屯區納骨空間約 3 萬位。")
     doc.add_paragraph("二、計畫範圍及環境", style="1-1")
     doc.add_paragraph("基地位於松竹路旁，基地面積12,345 m²（約1.23公頃），年雨量約1,700 毫米以上。")
     doc.add_paragraph("本地區年平均雨量 127.2mm，相對濕度 78%。")
     caption(doc, "表", 1, 1, "工程基本資料表")
-    table(doc, [["類別", "項目", "內容"], ["工址環境現況", "工程名稱", "臺中市北屯區第28公墓新建納骨塔工程"], ["工址環境現況", "構造", "地上4層、地下1層 RC造"]])
+    table(doc, [["類別", "項目", "內容"], ["工址環境現況", "工程名稱", "臺中市北屯區第28公墓新建納骨塔工程"], ["工址環境現況", "構造", "地上4層、地下1層 RC造"], ["工址環境現況", "地形", "緩坡地，高程約 GL+120 m"]])
     doc.add_paragraph("")
     p = doc.add_paragraph()
     p.add_run().add_picture(BytesIO(tiny_png()), width=Inches(1))
     caption(doc, "圖", 1, 1, "基地位置圖")
     doc.add_section(WD_SECTION.NEW_PAGE)
 
-    # 第二章
+    # 第二章（第一、二、三、六節：F；第四、五節：法規、案例沿用 T）
     doc.add_paragraph("第二章 準備作業", style="章節")
     doc.add_paragraph("一、施工風險評估小組之組成", style="1-1")
     doc.add_paragraph("本小組由設計單位組成，評估人員：吳嘉栩。")
@@ -132,27 +135,40 @@ def main(out, v2=False):
     p2 = doc.add_paragraph()
     p2.add_run().add_picture(BytesIO(tiny_png()), width=Inches(1))
     caption(doc, "圖", 2, 1, "施工風險評估作業流程示意")
+    doc.add_paragraph("三、工程功能需求分析", style="1-1")
+    doc.add_paragraph("本案需設置骨灰櫃位約 3 萬位及祭拜空間。")
     doc.add_paragraph("四、法規及施工規範彙整分析", style="1-1")
     if v2:
         doc.add_paragraph("營造安全衛生設施標準第 71 條規定，擋土支撐應由專任工程人員妥為設計。")
     else:
         doc.add_paragraph("營造安全衛生設施標準第 71 條規定，擋土支撐應由專任工程人員設計。")
+    doc.add_paragraph("五、相關工程災害案例分析", style="1-1")
+    doc.add_paragraph("民國100年某工地開挖時擋土支撐崩塌，造成 2 人死亡。")
+    doc.add_paragraph("六、工址環境現況及工程功能需求潛在危害辨識", style="1-1")
+    doc.add_paragraph("本案工址鄰近住宅區，施工車輛進出頻繁。")
     doc.add_section(WD_SECTION.NEW_PAGE)
 
-    # 第三章
+    # 第三章（auto：表頭沿用、內容依條件標籤）
     doc.add_paragraph("第三章 設計方案評選", style="章節")
     doc.add_paragraph("一、主要施工項目設計方案評選", style="1-1")
+    doc.add_paragraph("評估日期：112年5月1日")
+    doc.add_paragraph("（一）擋土設施")
     caption(doc, "表", 3, 1, "擋土設施設計方案評選表")
     table(doc, [["工程方案", "潛在危害", "可能之風險狀況", "備註"], ["擋土柱+斜撐", "倒塌", "擋土柱變形造成崩塌", ""]])
-    doc.add_paragraph("評估日期：112年5月1日")
+    doc.add_paragraph("（二）電梯組立")
     caption(doc, "表", 3, 2, "電梯組立設計方案評選表")
     table(doc, [["工程方案", "潛在危害", "可能之風險狀況", "備註"], ["電梯井道組立", "墜落", "電梯井開口墜落", ""]])
     doc.add_section(WD_SECTION.NEW_PAGE)
 
     # 第四章
     doc.add_paragraph("第四章 設計成果施工風險評估", style="章節")
+    doc.add_paragraph("一、作業拆解", style="1-1")
+    caption(doc, "表", 4, 1, "擋土支撐工程作業拆解表")
+    table(doc, [["第一階作業", "第二階作業", "作業內容"], ["擋土柱打設", "放樣", "以全站儀放樣"]])
+    caption(doc, "表", 4, 2, "假設工程作業拆解表")
+    table(doc, [["第一階作業", "第二階作業", "作業內容"], ["安全設施", "護欄設置", "設置施工護欄"]])
     doc.add_paragraph("二、施工風險評估", style="1-1")
-    caption(doc, "表", 4, 1, "設計階段施工風險評估表")
+    caption(doc, "表", 4, 3, "設計階段施工風險評估表")
     table(doc, [
         ["編號", "第一階作業", "危害類型", "可能之風險狀況", "可能性", "嚴重度", "風險值", "等級"],
         ["分項工程：A 假設工程", "", "", "", "", "", "", ""],
@@ -172,13 +188,14 @@ def main(out, v2=False):
         ["辦理事項", "產出之風險資訊", "傳遞對象", "後續辦理事項"],
         ["設計方案評選", "表3-1 擋土設施設計方案評選表", "主辦機關", "納入契約"],
         ["設計方案評選", "表3-7 吊掛作業設計方案評選表", "主辦機關", "納入契約"],
-        ["風險評估", "表4-1 施工規劃階段施工風險評估表", "施工廠商", "納入施工計畫"],
+        ["風險評估", "表4-3 施工規劃階段施工風險評估表", "施工廠商", "納入施工計畫"],
     ])
     doc.add_section(WD_SECTION.NEW_PAGE)
 
     # 第六章
     doc.add_paragraph("第六章 結論", style="章節")
     doc.add_paragraph("本報告依據公共工程施工階段職業安全衛生設施規劃之原則撰寫。")
+    doc.add_paragraph("本案為臺中市北屯區第28公墓新建納骨塔工程，地下1層、地上4層RC造建築物，已完成設計階段施工風險評估。")
 
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     doc.save(out)

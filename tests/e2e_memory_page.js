@@ -67,7 +67,7 @@ const ok = (c, m) => {
 
   // 刪除單筆
   await page.click('button:has-text("清除篩選")');
-  await page.fill('input[type=search]', '本案為臺中市');
+  await page.fill('input[type=search]', 'RC造建築物。');
   await page.press('input[type=search]', 'Enter');
   await page.dispatchEvent('input[type=search]', 'change');
   ok((await listRows()) === 1, '搜尋找到 1 筆');

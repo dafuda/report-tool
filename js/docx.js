@@ -357,6 +357,24 @@
   const CAP_RE = /^(表|圖)\s*([0-9０-９]+)\s*[-－–.．]\s*([0-9０-９]+)\s*[、：:．.\s]*(.*)$/;
   const TOC_STYLE = /toc|目錄|table of figures|圖表目錄|index/i;
 
+  /* 標題階層：3＝「一、」、4＝「（一）」；5＝「1.」「(1)」「A.」「①」等（第五階以後屬內文） */
+  const L3_RE = /^[一二三四五六七八九十]+\s*[、．.]/;
+  const L4_RE = /^[（(]\s*[一二三四五六七八九十]+\s*[）)]/;
+  const L5_RE = /^(\d+\s*[.、．)）]|[（(]\s*\d+\s*[）)]|[A-Za-zＡ-Ｚａ-ｚ]\s*[.、．)）]|[①-⑳⑴-⒇])/;
+  D.headingLevel = function (t) {
+    if (!t || t.length > 40 || /[。；;]$/.test(t)) return 0;
+    if (L3_RE.test(t)) return 3;
+    if (L4_RE.test(t)) return 4;
+    return 0;
+  };
+  D.isLevel5 = (t) => L5_RE.test(String(t || '').trim());
+  const CN_D = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  D.cnNum = function (c) {
+    if (c === '十') return 10;
+    if (c.length === 1) return CN_D[c] || 0;
+    if (c[0] === '十') return 10 + (CN_D[c[1]] || 0);
+    return (CN_D[c[0]] || 0) * 10 + (CN_D[c[2]] || 0);
+  };
   D.parseCaption = function (t) {
     const m = t.replace(/\s+/g, ' ').trim().match(CAP_RE);
     if (!m) return null;
@@ -368,8 +386,9 @@
     const blocks = [];
     let chapter = '前置';
     let section = '';
+    let secNo = 0; // 本章第幾節（依節標題出現順序）
     kids.forEach((el, idx) => {
-      const b = { id: 'b' + idx, idx, chapter, section, kind: 'other', text: '', style: '' };
+      const b = { id: 'b' + idx, idx, chapter, section, secNo, kind: 'other', text: '', style: '' };
       if (el.localName === 'p') {
         const pPr = D.kid(el, 'pPr');
         const ps = D.kid(pPr, 'pStyle');
@@ -392,28 +411,39 @@
           const m = t.match(CH_RE);
           chapter = m ? m[0].replace(/\s+/g, '') : t.slice(0, 10);
           section = '';
+          secNo = 0;
           b.chapter = chapter;
           b.section = '';
+          b.secNo = 0;
           b.title = t;
         } else if (sname === '1-1' || (SEC_RE.test(t) && t.length < 40)) {
           b.kind = 'heading';
           b.level = 2;
           section = t.slice(0, 30);
+          // 節號：優先讀標題中的「第四節」「四、」「四 」，讀不到才依出現順序
+          const sm = t.match(/^第?\s*([一二三四五六七八九十]+)\s*(節|[、．.\s])/);
+          secNo = sm ? D.cnNum(sm[1]) : secNo + 1;
           b.section = section;
+          b.secNo = secNo;
           b.title = t;
         } else if (cap && (/表名|圖名|caption|標號/i.test(sname) || t.length < 50)) {
           b.kind = 'caption';
           Object.assign(b, cap);
+        } else if (D.headingLevel(t) && !boxText) {
+          // 第三階「一、」、第四階「（一）」：短、不以句號結尾的才算標題
+          b.kind = 'heading';
+          b.level = D.headingLevel(t);
+          b.title = t;
         } else if (!t && !boxText && images.length) {
           b.kind = 'figure';
           b.images = images;
-        } else if (/^【待補圖：[^】]*】$/.test(t) && !boxText) {
+        } else if (/^【待補圖[：】]/.test(t) && /】$/.test(t) && !boxText) {
           b.kind = 'figure'; // 產出檔中的待補圖佔位框
           b.placeholder = true;
           b.images = [];
         } else if (!t && !boxText) b.kind = 'empty';
         else b.kind = 'p'; // 含文字方塊的段落也視為段落，文字方塊內的文字一併處理
-      } else if (el.localName === 'tbl' && ((!D.cellTextAll(el).trim() && D.imagesIn(el).length) || /^【待補圖：[^】]*】$/.test(D.cellTextAll(el).trim()))) {
+      } else if (el.localName === 'tbl' && ((!D.cellTextAll(el).trim() && D.imagesIn(el).length) || /^【待補圖(：[^】]*)?】$/.test(D.cellTextAll(el).trim()))) {
         // 只有圖片、沒有文字的表格（例如貼上的表格截圖）視為圖；產出檔中的待補圖佔位也是
         b.kind = 'figure';
         b.tableImage = true;
@@ -461,6 +491,7 @@
             kind: 'rows',
             chapter,
             section,
+            secNo,
             text: rowsText,
             title: g.title,
             rowStart: g.rowStart,
@@ -609,20 +640,22 @@
     pPr.insertBefore(el, before);
   };
   /* 把圖片段落換成紅框「待補圖」佔位文字；保留段落格式與分節 */
-  D.makePlaceholder = function (p, text) {
+  D.makePlaceholder = function (p, text, opt = {}) {
     const doc = p.ownerDocument;
     const pPr = D.kid(p, 'pPr');
     for (const c of Array.from(p.childNodes)) if (c !== pPr) p.removeChild(c);
-    const bdr = doc.createElementNS(W, 'w:pBdr');
-    for (const side of ['top', 'left', 'bottom', 'right']) {
-      const e = doc.createElementNS(W, 'w:' + side);
-      e.setAttributeNS(W, 'w:val', 'single');
-      e.setAttributeNS(W, 'w:sz', '8');
-      e.setAttributeNS(W, 'w:space', '4');
-      e.setAttributeNS(W, 'w:color', 'C00000');
-      bdr.appendChild(e);
+    if (opt.border) {
+      const bdr = doc.createElementNS(W, 'w:pBdr');
+      for (const side of ['top', 'left', 'bottom', 'right']) {
+        const e = doc.createElementNS(W, 'w:' + side);
+        e.setAttributeNS(W, 'w:val', 'single');
+        e.setAttributeNS(W, 'w:sz', '8');
+        e.setAttributeNS(W, 'w:space', '4');
+        e.setAttributeNS(W, 'w:color', 'C00000');
+        bdr.appendChild(e);
+      }
+      D.setPprChild(p, bdr);
     }
-    D.setPprChild(p, bdr);
     const jc = doc.createElementNS(W, 'w:jc');
     jc.setAttributeNS(W, 'w:val', 'center');
     D.setPprChild(p, jc);

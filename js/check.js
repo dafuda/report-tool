@@ -169,6 +169,22 @@
       }
     }
 
+    // 9. 工項前後對照（第三章評選 ↔ 第四章作業拆解 ↔ 第四章風險評估表的分項工程）
+    const named = (f) => blocks.filter((b) => f(b) && K.itemName(b)).map((b) => ({ b, name: K.itemName(b) }));
+    const ch3 = named((b) => b.chapter === '第三章' && (b.kind === 'table' || b.kind === 'figure'));
+    const ch4split = named((b) => b.chapter === '第四章' && (b.kind === 'table' || b.kind === 'figure') && /拆解/.test(b.capName || ''));
+    const ch4risk = named((b) => b.chapter === '第四章' && b.kind === 'rows');
+    const uniq = (arr) => arr.filter((x, i) => arr.findIndex((y) => K.itemCore(y.name) === K.itemCore(x.name)) === i);
+    const missingIn = (from, to, item, label) => {
+      if (!from.length || !to.length) return;
+      for (const x of uniq(from)) {
+        if (!to.some((y) => K.itemMatch(x.name, y.name))) add('工項前後不一致', loc(x.b), x.name, label, '（找不到）', `「${x.name}」在${label}中沒有對應的${item}`);
+      }
+    };
+    missingIn(ch4split, ch4risk, '分項工程', '第四章施工風險評估表');
+    missingIn(ch4risk, ch4split, '作業拆解表', '第四章作業拆解表');
+    missingIn(ch3, ch4split.concat(ch4risk), '工項', '第四章（作業拆解表與風險評估表）');
+
     // 8. 待填與待審
     for (const u of all) {
       for (const m of u.text.matchAll(/【(待填|待補圖|待審)[^】]*】/g)) add('待填／待審', u.where, m[0], '', '', '尚未填寫或待審');

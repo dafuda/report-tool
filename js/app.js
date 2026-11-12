@@ -59,9 +59,63 @@
   const MEM_KEY = 'rg-memory-v1';
   try {
     const m = JSON.parse(localStorage.getItem(MEM_KEY) || 'null');
-    if (m && m.entries) S.memory = Object.assign(RG.mem.empty(), m);
+    if (m && m.entries) S.memory = Object.assign(RG.mem.empty(), { classifyVersion: 1 }, m); // 沒有版本欄位的是舊原則的記憶
   } catch (e) {
     /* ignore */
+  }
+  /* 分類原則更新（第 2 版：依架構由大到小、依章節特性）：舊記憶與舊分類確認停用，先另存備份 */
+  const LEGACY_KEY = 'rg-memory-legacy-v1';
+  const LEGACY_NOTICE_KEY = 'rg-legacy-notice';
+  if ((S.memory.classifyVersion || 1) < RG.mem.CLASSIFY_VERSION) {
+    const n = Object.keys(S.memory.entries || {}).length + Object.keys(S.overrides || {}).length + Object.keys(S.planOverrides || {}).length;
+    if (n) {
+      const legacy = { app: 'report-tool', note: '分類原則更新前的記憶庫與分類確認備份', savedAt: new Date().toISOString(), memory: S.memory, overrides: S.overrides, planOverrides: S.planOverrides, masterSig: S.masterSig };
+      try {
+        localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy));
+        localStorage.setItem(LEGACY_NOTICE_KEY, String(Object.keys(S.memory.entries || {}).length));
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    S.memory = Object.assign(RG.mem.empty(), { threshold: S.memory.threshold || 0.9 });
+    S.overrides = {};
+    S.planOverrides = {};
+    try {
+      localStorage.setItem(MEM_KEY, JSON.stringify(S.memory));
+    } catch (e) {
+      /* ignore */
+    }
+    save();
+  }
+  function legacyNotice() {
+    let n = null;
+    try {
+      n = localStorage.getItem(LEGACY_NOTICE_KEY);
+    } catch (e) {
+      /* ignore */
+    }
+    if (!n) return null;
+    return h('div', { class: 'note warn' },
+      `分類原則已更新（依架構由大到小、依章節特性判斷）。先前用舊原則確認的記憶庫（${n} 筆）與分類確認已停用並清空，請用新原則重新確認。`,
+      h('div', { class: 'row', style: { marginTop: '6px' } },
+        h('button', { class: 'btn small', onclick: () => {
+          let data = null;
+          try {
+            data = localStorage.getItem(LEGACY_KEY);
+          } catch (e) {
+            /* ignore */
+          }
+          if (data) download('舊原則記憶庫備份.json', data, 'application/json');
+          else toast('找不到備份資料', 'bad');
+        } }, '下載舊資料備份 .json'),
+        h('button', { class: 'btn small ghost', onclick: () => {
+          try {
+            localStorage.removeItem(LEGACY_NOTICE_KEY);
+          } catch (e) {
+            /* ignore */
+          }
+          render();
+        } }, '關閉提示')));
   }
   let memWarned = false;
   function saveMemory() {
@@ -576,6 +630,7 @@
   function viewClassify() {
     const wrap = h('div', {}, h('h1', { class: 'view-title' }, '2 分類與標籤確認'),
       h('p', { class: 'view-desc' }, '每個段落與表格都先由工具初判為 F 專案事實、T 通用範本、C 條件式、M 混合，並標上適用條件標籤。用表頭的篩選把同性質的項目找出來，可以一起設定分類、加減標籤或全部確認；也可以用鍵盤快速分類。修改過的列會以淺黃底顯示。'));
+    wrap.appendChild(legacyNotice() || h('span'));
     wrap.appendChild(classifyLegend());
     if (!S.master) return wrap.appendChild(needMaster()), wrap;
     const f = S.ui.cls;
@@ -914,7 +969,9 @@
   async function importMemory(file) {
     try {
       const m = JSON.parse(await file.text());
-      const n = RG.mem.merge(S.memory, m.memory || m);
+      const mm = m.memory || m;
+      if (!(mm.classifyVersion >= RG.mem.CLASSIFY_VERSION) && !confirm('這份記憶庫是分類原則更新前（舊原則）確認的結果，合併後會用舊的分類蓋過新原則的初判。\n確定要匯入嗎？')) return;
+      const n = RG.mem.merge(S.memory, mm);
       saveMemory();
       if (S.master) {
         S.memResult = Object.assign(RG.mem.apply(S.memory, S.master.blocks, { overrides: S.overrides, planOverrides: S.planOverrides, sig: S.masterSig, keepExisting: true }), { name: S.master.name, prevName: '', sameMaster: true });
@@ -935,10 +992,10 @@
       h('table', { class: 'data', style: { marginTop: '10px' } },
         h('thead', {}, h('tr', {}, h('th', {}, '分類'), h('th', {}, '指的是'), h('th', {}, '產出時的處理'))),
         h('tbody', {},
-          row('F', '只屬於本案的資料：工程名稱、地址、面積、日期、人員、表1-1 等', '有設定母本寫法的欄位 → 換成新案值；整段（表格為整格）找不到任何對應欄位 → 改為紅字【待填】，絕不帶入母本數字'),
-          row('T', '與案子無關的通用文字：前言、方法說明、法規、災害案例、風險矩陣', '原文照抄，不替換專案事實；只做已知錯字更正'),
-          row('C', '依構造、工項、環境條件決定是否出現：擋土、開挖、電梯、骨櫃…', '「確認標籤」全部符合新案條件才保留（並替換其中的專案事實），否則整段／整表刪除'),
-          row('M', '固定句型中嵌入專案事實：「本案為地下1層、地上4層RC造…」', '只替換句中的專案事實、保留句型；若替換後可能不通（如地下0層）或句中提到新案沒有的工項 → 淺藍底＋註解「待審」'))),
+          row('F', '只屬於本案的資料。第一章、第二章第一／二／三／六節的內文（第五階以後的 1.、(1)… 與一般段落）與表格內容預設為 F', '段落：整段改為紅字【待填】（保留「1.」編號與「欄位：」）；值剛好是已填新案值的母本寫法時直接換成新案值。表格：上方表頭與左側表頭沿用，內容改待填。表名／圖名：保留編號，名稱改【待填：專案事實】；圖片換成【待補圖】'),
+          row('T', '與案子無關、直接沿用：目錄、前四階標題（第一章／第一節／一、／（一））、結尾為「：」的引導句、第二章第四節（法規）與第五節（案例）、風險矩陣', '原文照抄，不替換專案事實；只做已知錯字更正'),
+          row('C', '第三～六章重複格式的表格與內容，依構造、工項、環境條件決定是否出現：擋土、開挖、電梯、骨櫃…', '「確認標籤」全部符合新案條件才保留（並替換其中的專案事實），否則整段／整表刪除；第三～五章同名工項連動刪除'),
+          row('M', '第三～六章中，固定句型嵌入專案事實：「本案為地下1層、地上4層RC造…」', '只替換句中的專案事實、保留句型；若替換後可能不通（如地下0層）或句中提到新案沒有的工項 → 淺藍底＋註解「待審」'))),
       h('div', { class: 'muted', style: { marginTop: '8px' } }, '圖片與表格截圖（內容是圖、無法編輯的表格）：F 產出時換成紅框【待補圖：圖x-x 名稱】、T 沿用原圖、C 依確認標籤保留或刪除；依圖名自動初判，沒有圖名或無法判斷時預設為 F。文字方塊內的文字與頁首頁尾，比照所在段落處理專案事實替換與錯字更正。'),
       h('h3', { style: { fontSize: '14px', margin: '14px 0 6px' } }, '鍵盤快速分類'),
       h('div', { class: 'muted', style: { marginBottom: '6px' } }, '先用滑鼠點清單中的任一列（該列以藍底標示為「目前列」），之後就可以用鍵盤操作。游標在輸入欄或下拉選單裡時，鍵盤快速鍵不會作用。'),
@@ -1580,6 +1637,7 @@
   function viewMemory() {
     const wrap = h('div', {}, h('h1', { class: 'view-title' }, '記憶庫'),
       h('p', { class: 'view-desc' }, '這裡列出所有記住的分類、標籤與工項規劃決定（依段落文字記錄，所有專案共用）。可以直接修改、刪除，或匯出 Excel 檢查後再匯入。修改會立即套用到目前讀入的母本。'));
+    wrap.appendChild(legacyNotice() || h('span'));
     const f = S.ui.memv;
     const cur = currentKeys();
     const ctx = { cur, hasMaster: !!S.master };
@@ -1871,6 +1929,7 @@
       h('p', { class: 'view-desc' }, '以下規則對應規劃書中的 rules/*.yaml，以 JSON 格式編輯。修改後按「儲存」，會套用到分類初判、產出與檢查。「關鍵字」與「match」欄位是正規表示式。'));
     wrap.appendChild(keywordCard());
     const items = [
+      ['sectionPolicy', '章節分類原則（由大到小）', '格式：[{"chapter": "第一章", "sections": "*", "body": "F"}]。body：F＝內文與表格內容預設專案事實（整段待填）、T＝沿用、auto＝依條件標籤與專案事實判斷；sections：* 或第幾節，例如 "1,2,3,6"。目錄、前四階標題（第一章／第一節／一、／（一））與結尾為「：」的段落一律 T'],
       ['customTags', '自訂條件標籤', '格式：["鷹架", "滯留設施"]。在分類頁「登錄為自訂標籤」會加到這裡；登錄後不會再被當成打錯字。新案要保留這類內容，請到「3 專案資料」最下方啟用'],
       ['tagKeywords', '條件標籤關鍵字（建庫初判用）', '格式：{"標籤": ["關鍵字1", "關鍵字2"]}'],
       ['tagRules', '專案事實 → 條件標籤 推導規則（tag_rules）', '格式：[{"field": "欄位", "match": "正規表示式", "tags": ["標籤"]}]；always: true 表示一律加入'],
@@ -1883,7 +1942,7 @@
       ['factTableCaptions', '視為專案事實表的表名（正規表示式）', ''],
       ['figureFactCaptions', '視為 F 專案圖的圖名／表名（正規表示式）', '圖片或表格截圖的名稱符合時，產出換成【待補圖】；沒有名稱或都不符合時也預設為 F'],
       ['figureTemplateCaptions', '視為 T 通用圖的圖名（正規表示式）', '符合時沿用原圖；出現條件關鍵字的圖會判為 C'],
-      ['factValueHeaders', 'F 專案事實表的「值」欄表頭（正規表示式）', '表頭符合的欄位，找不到新案值時整格標【待填】；都不符合時以最後一欄為值欄'],
+      ['tableLabelHeaders', 'F 專案事實表的左側表頭（正規表示式）', '表頭（第 1 列）符合這些字的欄位視為左側表頭，沿用不改；第 1 欄一律視為表頭；其餘儲存格改為待填'],
       ['refTableCaption', '表5-1（依實際表格同步）的表名（正規表示式）', ''],
     ];
     for (const [key, title, hint] of items) {
@@ -1896,7 +1955,7 @@
               S.rules[key] = isStr ? ta.value.trim() : JSON.parse(ta.value);
               save();
               invalidateOutputs();
-              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions', 'figureFactCaptions', 'figureTemplateCaptions'].includes(key)) reclassifyKeepMemory();
+              if (S.master && ['tagKeywords', 'templateSections', 'templateCaptions', 'factTableCaptions', 'figureFactCaptions', 'figureTemplateCaptions', 'sectionPolicy'].includes(key)) reclassifyKeepMemory();
               toast('已儲存：' + title, 'ok');
             } catch (e) {
               toast('JSON 格式錯誤：' + e.message, 'bad');
@@ -1956,16 +2015,22 @@
     if (!f) return;
     try {
       const proj = JSON.parse(await f.text());
+      // 分類原則更新前存的專案檔：專案資料、規則照常讀入，舊原則的分類確認與記憶不沿用
+      const oldRules = !(proj.memory && proj.memory.classifyVersion >= RG.mem.CLASSIFY_VERSION);
+      const keep = { overrides: S.overrides, planOverrides: S.planOverrides };
       applyLoaded(proj);
-      if (proj.memory) {
+      if (oldRules) {
+        S.overrides = keep.overrides;
+        S.planOverrides = keep.planOverrides;
+      } else if (proj.memory) {
         RG.mem.merge(S.memory, proj.memory);
         saveMemory();
       }
       $('#projectName').value = S.projectName;
-      if (S.master) K.classify(S.master.blocks, S.rules, S.facts);
+      if (S.master) reclassifyKeepMemory();
       invalidateOutputs();
       save();
-      toast('已開啟專案檔', 'ok');
+      toast(oldRules ? '已開啟專案檔。這是分類原則更新前的專案檔：專案資料與規則已讀入，舊的分類確認與記憶不沿用' : '已開啟專案檔', 'ok');
       render();
     } catch (err) {
       toast('專案檔格式錯誤：' + err.message, 'bad');

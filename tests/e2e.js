@@ -31,13 +31,13 @@ const ok = (cond, msg) => {
   });
   console.log('structure', JSON.stringify(rep));
   ok(rep.ch === 6, '辨識出 6 章');
-  ok(rep.tables === 5 && rep.caps === 7, '5 張表格、7 個表名（含 2 張表格截圖）');
+  ok(rep.tables === 7 && rep.caps === 9, '7 張表格、9 個表名（含 2 張表格截圖）');
   ok(rep.noCap.length === 0, '每個表名都對應到表格或表格截圖');
   ok(rep.imgTables.join() === '表2-1,表2-2', '辨識出表格截圖：表名下方是圖片、1 格表格內放圖片');
   ok(rep.box === 1 && rep.hf === 1, '辨識出文字方塊段落 1 個、有文字的頁首頁尾 1 個');
   ok(rep.groups === 3, '表4-1 切出 3 個分項工程子表格');
   ok(rep.figs === 2, '2 個圖名');
-  ok(rep.seq === 9, 'SEQ 功能變數 9 個');
+  ok(rep.seq === 11, 'SEQ 功能變數 11 個');
   const figs = await page.evaluate(() => RG.app.S.master.blocks.filter((b) => b.kind === 'figure').map((b) => `${b.capType}${b.capNo}:${b.auto.cat}`));
   console.log('figures', figs.join(' '));
   ok(figs.includes('圖1-1:F'), '圖1-1 基地位置圖 → F 專案圖');
@@ -137,15 +137,19 @@ const ok = (cond, msg) => {
   ok(outInfo.text.includes('新竹縣竹北市虛構活動中心新建工程'), '工程名稱已替換');
   ok(!outInfo.text.includes('臺中市北屯區第28公墓新建納骨塔工程'), '母本工程名稱無殘留（含封面文字方塊）');
   ok(outInfo.hf.includes('新竹縣竹北市虛構活動中心新建工程') && !outInfo.hf.includes('第28公墓'), '頁首的工程名稱已替換');
-  ok(['【待補圖：圖1-1 基地位置圖】', '【待補圖：表2-1 基礎容許承載力】', '【待補圖：表2-2 地下水位觀測紀錄】'].every((t) => outInfo.text.includes(t)), 'F 圖片與表格截圖換成【待補圖】佔位框');
+  ok((outInfo.text.match(/【待補圖】/g) || []).length === 4, 'F 圖片與表格截圖（含封面標誌）換成【待補圖】');
+  ok(['圖1-1 【待填：專案事實】', '表2-1 【待填：專案事實】', '表2-2 【待填：專案事實】', '表1-1 【待填：專案事實】'].every((t) => outInfo.text.includes(t)), 'F 表名／圖名保留編號、名稱改【待填：專案事實】');
   console.log('output figs', JSON.stringify(outInfo.figs));
   ok(outInfo.figs.join() === '圖2-1', '只剩 T 通用圖（圖2-1）沿用原圖');
   console.log('holders', JSON.stringify(outInfo.holders));
   ok(outInfo.holders.filter((x) => typeof x === 'string').join() === '圖1-1,表2-1,表2-2', '重新讀入產出檔時，佔位框仍對應到正確的圖名與表名');
-  ok(outInfo.text.includes('【待補圖：未命名圖片】'), '沒有圖名的封面標誌（預設 F）換成【待補圖：未命名圖片】');
-  ok(outInfo.text.includes('本案為新竹縣竹北市虛構活動中心新建工程'), '含專案事實的段落沒有被誤刪');
+  ok(outInfo.text.includes('1. 【待填：專案事實】'), '第五階內文整段待填，保留「1.」編號');
+  ok(outInfo.text.includes('本計畫目標如下：'), '結尾為「：」的引導句沿用（T）');
+  ok(outInfo.text.includes('（一）計畫緣起') && outInfo.text.includes('營造安全衛生設施標準第 71 條'), '前四階標題與第二章第四節法規沿用（T）');
+  ok(outInfo.text.includes('【待填：地形】') && outInfo.text.includes('地上3層、地下0層 SC造'), 'F 表格：左側表頭沿用、內容待填；值剛好是已填欄位時換成新案值');
+  ok(!outInfo.text.includes('國豐街') && !outInfo.text.includes('吳嘉栩'), '第一章、第二章 F 段落整段待填，母本資料不殘留');
   ok(outInfo.text.includes('地上3層'), '地上層數已替換');
-  ok(outInfo.text.includes('【待填：地址】') && !outInfo.text.includes('松竹路'), '未提供的地址標為待填，不帶入母本值');
+  ok(!outInfo.text.includes('松竹路'), '未提供的地址不帶入母本值');
   ok(outInfo.text.includes('逃生方向指示燈'), '錯字已自動更正');
   ok(!outInfo.text.includes('代辨機關'), '代辨機關已更正');
   console.log('review', JSON.stringify(outInfo.review));
@@ -153,14 +157,14 @@ const ok = (cond, msg) => {
   ok(outInfo.review.some((r) => r.includes('地下層數') && r.includes('0')), 'M 類：地下層數為 0 時標「待審」');
   ok(outInfo.fTodo.includes('【待填：專案事實】'), 'F 類：沒有對應欄位的段落整段標【待填】');
   ok(!outInfo.text.includes('115年6月'), 'F 類：母本日期不帶入新案');
-  ok(outInfo.text.includes('本案為新竹縣竹北市虛構活動中心新建工程'), 'M 類：句型保留');
+  ok(outInfo.text.includes('本案為新竹縣竹北市虛構活動中心新建工程，地下0層'), 'M 類（第六章）：句型保留、替換專案事實');
 
   // 產出檔檢查
   await page.click('button:has-text("對產出檔執行一致性檢查")');
   await page.waitForSelector('text=檢查結果');
   const iss2 = await page.evaluate(() => RG.app.S.lastCheck.issues.map((i) => i.item + '｜' + i.textA));
   console.log(iss2.join('\n'));
-  ok(iss2.some((x) => x.startsWith('母本殘留')), '產出檔殘留檢查有結果（北屯區／松竹路等未提供新值）');
+  ok(!iss2.some((x) => x.startsWith('母本殘留') && /松竹路|國豐街|吳嘉栩/.test(x)), '產出檔沒有第一、二章的母本殘留');
   ok(iss2.some((x) => x.startsWith('待填')), '列出待填項目');
   ok(!iss2.some((x) => x.startsWith('風險值錯誤')), '產出檔風險值已全部正確');
   await page.screenshot({ path: path.join(outDir, '6-check-output.png'), fullPage: true });

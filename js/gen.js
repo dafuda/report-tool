@@ -140,18 +140,31 @@
       const all = match(before, cat !== 'T');
       const covered = all.some((m) => m.fact);
 
-      // F 專案事實：整段找不到任何對應的新案欄位 → 整段改為【待填】（保留「欄位：」前綴）
-      if (cat === 'F' && !covered && opts.wholeTodo !== false) {
+      // F 專案事實：整段改為【待填】（保留「1.」「(1)」編號與「欄位：」前綴）；
+      // 只有「值」剛好就是某個已填新案值之欄位的母本寫法時，才直接換成新案值
+      const fPrefix = () => {
+        const num = before.match(/^\s*(\d+\s*[.、．)）]|[（(]\s*\d+\s*[）)]|[A-Za-zＡ-Ｚａ-ｚ]\s*[.、．)）]|[①-⑳⑴-⒇])\s*/);
+        let k = num ? num[0].length : 0;
+        const pm = before.slice(k).match(/^([^：:，。\n]{1,15})([：:])\s*/);
+        if (pm) k += pm[0].length;
+        return { keepLen: k, label: pm ? pm[1].trim() : '專案事實' };
+      };
+      const exactCovered = (from) => {
+        const fm = all.filter((m) => m.fact && m.start >= from).sort((a, z) => a.start - z.start);
+        if (!fm.length || fm.some((m) => m.type === '待填')) return false;
+        let rest = before.slice(from, fm[0].start);
+        for (let i = 0; i < fm.length; i++) rest += before.slice(fm[i].end, i + 1 < fm.length ? fm[i + 1].start : before.length);
+        return /^[\s、，,。.；;:：（）()\-－~～]*$/.test(rest);
+      };
+      if (cat === 'F' && opts.wholeTodo !== false && !(covered && exactCovered(fPrefix().keepLen))) {
         if (!options.fillMissingF) {
           stats.uncoveredF++;
         } else {
-          const pm = before.match(/^(\s*)([^：:，。\n]{1,15})([：:])/);
-          const keepLen = pm ? pm[0].length : 0;
-          const label = pm ? pm[2].trim() : '專案事實';
-          const lead = before.slice(keepLen).match(/^\s*/)[0].length;
-          D.replaceInParagraph(p, [{ start: keepLen + lead, end: before.length, repl: `【待填：${label}】`, mark: 'todo' }]);
+          const { keepLen, label } = fPrefix();
+          if (keepLen >= before.trimEnd().length) return false; // 只有編號或「欄位：」，沒有內容
+          D.replaceInParagraph(p, [{ start: keepLen, end: before.trimEnd().length, repl: `【待填：${label}】`, mark: 'todo' }]);
           if (!opts.silent) stats.fTodo++;
-          record(b, loc, '待填', '母本 ' + b.id, before, D.paraText(p), 'F 專案事實：找不到對應的新案欄位，整段改為待填（母本原文見左欄，不帶入新案）', true);
+          record(b, loc, '待填', '母本 ' + b.id, before, D.paraText(p), 'F 專案事實：整段改為待填（母本原文見左欄，不帶入新案）', true);
           return true;
         }
       }
@@ -190,24 +203,35 @@
       return true;
     };
 
-    /* F 表格：判斷哪些儲存格是「值」 */
-    const fieldLabels = new Set(RG.FIELD_DEFS.flatMap((d) => [d.label, ...d.labels]));
-    const valueHdrRe = K.safeRe(rules.factValueHeaders || '(?!)');
+    /* F 表格：上方表頭列與左側表頭欄沿用（T），其餘儲存格為專案事實 */
+    const labelHdrRe = K.safeRe(rules.tableLabelHeaders || '(?!)');
     const genericHdrRe = /^(內容|說明|資料|數值|值)$/;
     const firstLine = (s) => s.trim().split('\n')[0].trim().slice(0, 15);
     const fTableInfo = (tbl) => {
       const trs = D.kids(tbl, 'tr');
       const headers = trs.length ? D.kids(trs[0], 'tc').map((tc) => D.cellText(tc).trim()) : [];
-      const valueCols = new Set();
-      headers.forEach((t, i) => valueHdrRe && t && valueHdrRe.test(t) && valueCols.add(i));
-      if (!valueCols.size && headers.length) valueCols.add(headers.length - 1);
-      return { headers, valueCols };
+      // 第 2 列有垂直合併的延續格 → 表頭有 2 列
+      const headerRows = trs.length > 1 && D.kids(trs[1], 'tc').some((tc) => D.vMerge(tc) === 'continue') ? 2 : 1;
+      const labelCols = new Set([0]);
+      headers.forEach((t, i) => labelHdrRe && t && labelHdrRe.test(t) && labelCols.add(i));
+      return { headers, headerRows, labelCols };
     };
-    const isValueCell = (ci, text, info) => {
+    const isValueCell = (ri, ci, text, info) => {
       const t = text.trim();
-      if (!t || fieldLabels.has(t) || ORDINAL_RE.test(t) || /^【待填/.test(t)) return false;
-      if (info.headers.includes(t)) return false;
-      return info.valueCols.has(ci) || /\d/.test(t);
+      if (!t || ri < info.headerRows || info.labelCols.has(ci) || /^【待填/.test(t)) return false;
+      return !ORDINAL_RE.test(t);
+    };
+    const cellExact = (text) => {
+      const ms = match(text, true).filter((m) => m.fact);
+      if (!ms.length || ms.some((m) => m.type === '待填')) return false;
+      let rest = '';
+      let pos = 0;
+      for (const m of ms.sort((a, z) => a.start - z.start)) {
+        rest += text.slice(pos, m.start);
+        pos = m.end;
+      }
+      rest += text.slice(pos);
+      return /^[\s、，,。.；;:：（）()\-－~～]*$/.test(rest);
     };
     const cellLabel = (cells, ci, info) => {
       let left = '';
@@ -235,6 +259,16 @@
         continue;
       }
       const cat = K.effective(b, overrides).cat;
+      if (b.kind === 'caption' && b.linkTo && byId[b.linkTo] && K.effective(byId[b.linkTo], overrides).cat === 'F' && (byId[b.linkTo].kind === 'figure' ? options.figurePlaceholder : options.fillMissingF)) {
+        const before = D.paraText(el);
+        const nm = before.match(/^\s*(表|圖)\s*[0-9０-９]+\s*[-－–.．]\s*[0-9０-９]+\s*[、：:．.\s]*/);
+        const end = before.trimEnd().length;
+        if (nm && end > nm[0].length) {
+          D.replaceInParagraph(el, [{ start: nm[0].length, end, repl: '【待填：專案事實】', mark: 'todo' }]);
+          addDiff(b, where(b), '待填', '母本 ' + b.id, before, D.paraText(el), `F 專案事實${b.capType === '圖' ? '圖' : '表'}：保留編號，名稱改為待填`, true);
+          continue;
+        }
+      }
       if (el.localName === 'tbl' && b.kind !== 'figure') {
         const groupOfRow = {};
         for (const g of b.groups || []) {
@@ -258,9 +292,9 @@
           cells.forEach((tc, ci) => {
             const loc = `${where(b)} 第${ri + 1}列第${ci + 1}欄`;
             // F 表格：「值」儲存格找不到對應的新案欄位 → 整格【待填】（第 1 列視為表頭）
-            if (rowCat === 'F' && ri > 0) {
+            if (rowCat === 'F' && !(go && ri === go.gb.rowStart)) {
               const ct = D.cellText(tc);
-              if (isValueCell(ci, ct, fInfo) && !isCovered(ct)) {
+              if (isValueCell(ri, ci, ct, fInfo) && !cellExact(ct)) {
                 if (!options.fillMissingF) stats.uncoveredF++;
                 else {
                   const label = cellLabel(cells, ci, fInfo);
@@ -268,7 +302,7 @@
                   if (run) D.markRun(run, 'todo');
                   stats.fTodo++;
                   changed = true;
-                  addDiff(owner, loc, '待填', '母本 ' + owner.id, ct, `【待填：${label}】`, 'F 專案事實：找不到對應的新案欄位，整格改為待填（母本原文見左欄，不帶入新案）', true);
+                  addDiff(owner, loc, '待填', '母本 ' + owner.id, ct, `【待填：${label}】`, 'F 專案事實表：表頭沿用，內容改為待填（母本原文見左欄，不帶入新案）', true);
                   return;
                 }
               }
@@ -286,11 +320,11 @@
         if (cat === 'F' && options.figurePlaceholder) {
           const imgPs = (el.localName === 'p' ? [el] : D.all(el, 'p').filter((p) => !D.inFallback(p))).filter((p) => D.hasImage(p));
           imgPs.forEach((p, i) => {
-            if (i === 0) D.makePlaceholder(p, `【待補圖：${label}】`);
+            if (i === 0) D.makePlaceholder(p, '【待補圖】', { border: false });
             else for (const r of D.runsOf(p)) if (D.hasImage(r)) r.parentNode.removeChild(r);
           });
           stats.figPlaceholder++;
-          addDiff(b, where(b), '待補圖', '母本 ' + b.id, `［${what}：${label}，${(b.images || []).length} 張］`, `【待補圖：${label}】`, `F 專案${what}：母本的${what}不沿用，請放入新案的${what}`, true);
+          addDiff(b, where(b), '待補圖', '母本 ' + b.id, `［${what}：${label}，${(b.images || []).length} 張］`, '【待補圖】', `F 專案${what}：母本的${what}不沿用，請放入新案的${what}`, true);
         } else {
           addDiff(b, where(b), '沿用母本', '母本 ' + b.id, `［${what}：${label}］`, `［${what}：${label}］`, cat === 'C' ? '條件符合，沿用母本' + what : `${K.CATS[cat] || cat}，沿用母本${what}`, cat === 'F');
         }
