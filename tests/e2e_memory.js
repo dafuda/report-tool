@@ -49,6 +49,8 @@ const ok = (cond, msg) => {
     S.overrides[B.find((x) => x.kind === 'table' && x.capNo === '3-2').id] = { tags: ['電梯', 'RC'] };
     const g = B.find((x) => x.kind === 'rows' && x.title.includes('骨櫃'));
     S.planOverrides[g.id] = 'keep';
+    const logo = B.find((x) => x.kind === 'figure' && !x.capName);
+    S.overrides[logo.id] = { cat: 'T' }; // 封面標誌（沒有圖名）改為 T 沿用
     remember(B);
   });
   const memCount = await page.evaluate(() => RG.mem.stats(RG.app.S.memory).count);
@@ -72,6 +74,11 @@ const ok = (cond, msg) => {
   ok(r.missing.some((t) => t.includes('國豐街253巷')), '被刪除的段落列在「前一份有、這份沒有」');
   const fig = await page.evaluate(() => { const b = RG.app.S.master.blocks.find((x) => x.kind === 'figure' && x.capName === '基地位置圖'); return b.mem && b.mem.state; });
   ok(fig === 'exact', '圖片依圖名記憶，換版本後沿用');
+  const noName = await page.evaluate(() => RG.app.S.master.blocks.filter((x) => x.kind === 'figure' && !x.capName).map((b) => ({ id: b.id, names: (b.imgNames || []).join(), mem: b.mem && b.mem.state, cat: RG.kb.effective(b, RG.app.S.overrides).cat })));
+  console.log('no-caption figures', JSON.stringify(noName));
+  ok(noName.length === 2 && noName.every((x) => x.mem), '沒有圖名的圖片也有記憶狀態（會出現在「需確認」篩選）');
+  ok(noName.some((x) => x.mem === 'exact' && x.cat === 'T'), '沒有圖名的封面標誌：位置改變仍依圖片檔沿用 T');
+  ok(noName.some((x) => x.mem === 'new' && x.cat === 'F'), '沒有圖名的新照片：標為新段落，預設 F');
 
   // 4. 只看需確認的 → 確認 → 重新整理後同一份母本，全部沿用
   await page.evaluate(() => RG.app.go('classify'));

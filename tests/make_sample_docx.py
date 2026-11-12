@@ -19,8 +19,9 @@ from docx.oxml.ns import qn
 from docx.shared import Inches
 
 
-def tiny_png():
-    raw = b"\x00\xff\x00\x00" * 1
+def tiny_png(rgb=(255, 0, 0)):
+    """1x1 PNG；不同顏色產生不同的圖片檔（用來測試無圖名圖片依檔案內容記憶）。"""
+    raw = b"\x00" + bytes(rgb)
     def chunk(t, d):
         c = struct.pack(">I", len(d)) + t + d
         return c + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
@@ -86,7 +87,14 @@ def main(out, v2=False):
     add_textbox(doc.add_paragraph(), "臺中市北屯區第28公墓新建納骨塔工程")
     doc.add_paragraph("臺中市北屯區第28公墓新建納骨塔工程")
     doc.add_paragraph("設計階段施工風險評估報告")
+    if not v2:
+        # 封面機關標誌：沒有圖名的圖片
+        doc.add_paragraph().add_run().add_picture(BytesIO(tiny_png((0, 0, 255))), width=Inches(0.5))
     doc.add_paragraph("中華民國115年6月")
+    if v2:
+        # 改版：標誌移到日期下方（位置不同、圖片檔相同），另加一張沒有圖名的新照片
+        doc.add_paragraph().add_run().add_picture(BytesIO(tiny_png((0, 0, 255))), width=Inches(0.5))
+        doc.add_paragraph().add_run().add_picture(BytesIO(tiny_png((0, 160, 0))), width=Inches(0.5))
     doc.add_paragraph("代辨機關：臺中市政府")
     doc.add_section(WD_SECTION.NEW_PAGE)
 

@@ -13,6 +13,20 @@
   M.norm = (s) => String(s || '').normalize('NFKC').replace(/\s*\n\s*/g, '|').replace(/\s+/g, '');
   const legacyNorm = (s) => String(s || '').normalize('NFKC').replace(/\s+/g, '');
   /* cyrb53：快速字串雜湊 */
+  /* 位元組雜湊：沒有圖名的圖片依圖片檔內容記憶 */
+  M.hashBytes = function (bytes) {
+    let h1 = 0xdeadbeef,
+      h2 = 0x41c6ce57;
+    for (let i = 0; i < bytes.length; i++) {
+      h1 = Math.imul(h1 ^ bytes[i], 2654435761);
+      h2 = Math.imul(h2 ^ bytes[i], 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+  };
+  M.IMG_PREFIX = '[圖檔]';
+  M.isImgEntry = (e) => String(e.nh || '').startsWith(M.IMG_PREFIX);
   M.hash = function (str, seed = 0) {
     let h1 = 0xdeadbeef ^ seed,
       h2 = 0x41c6ce57 ^ seed;
@@ -26,7 +40,18 @@
     return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
   };
   /* 圖片沒有文字，以「[圖]圖名」或「[表]表名」記憶（不含編號，編號改版會變） */
-  const textOf = (b) => (b.kind === 'figure' ? (b.capName ? `[${b.capType || '圖'}]${b.capName}` : '') : b.kind === 'rows' ? b.title + '\n' + b.text : b.text);
+  /* 有圖名：以「[圖]圖名」記憶；沒有圖名：以圖片檔內容的指紋「[圖檔]…」記憶（b.imgSig 由讀入母本時計算） */
+  const textOf = (b) =>
+    b.kind === 'figure'
+      ? b.capName
+        ? `[${b.capType || '圖'}]${b.capName}`
+        : b.imgSig
+          ? M.IMG_PREFIX + b.imgSig
+          : ''
+      : b.kind === 'rows'
+        ? b.title + '\n' + b.text
+        : b.text;
+  const pvOf = (b) => (b.kind === 'figure' && !b.capName && b.imgSig ? `［無圖名圖片］${(b.imgNames || []).join('、')}` : textOf(b).replace(/\s+/g, ' ').trim().slice(0, 120));
   M.memorable = (b) => M.KINDS.includes(b.kind) && M.norm(textOf(b)).length > 0;
   M.keyOf = function (b) {
     if (b._memKey) return b._memKey;
@@ -73,7 +98,7 @@
       kind: b.kind,
       len: b._memNorm.length,
       nh: b._memNorm.slice(0, M.HEAD),
-      pv: textOf(b).replace(/\s+/g, ' ').trim().slice(0, 120),
+      pv: pvOf(b),
       cat: e.cat,
       tags: e.tags.slice(),
       plan,
@@ -146,11 +171,16 @@
       const byKind = {};
       // 已被完全相同對應用掉的記憶也可以再拿來推定相似段落（例如表4-13 許多相似的風險條目）
       for (const [key, ent] of Object.entries(entries)) {
-        if (ent.conflict) continue;
+        if (ent.conflict || M.isImgEntry(ent)) continue; // 圖片指紋只做完全比對
         (byKind[ent.kind] = byKind[ent.kind] || []).push([key, ent, null]);
       }
       for (const b of pending) {
         const n = b._memNorm;
+        if (n.startsWith(M.IMG_PREFIX)) {
+          b.mem = { state: 'new' };
+          res.fresh++;
+          continue;
+        }
         const head = n.slice(0, M.HEAD);
         const HB = bigrams(head);
         let best = null;

@@ -140,7 +140,9 @@ const ok = (cond, msg) => {
   ok(['【待補圖：圖1-1 基地位置圖】', '【待補圖：表2-1 基礎容許承載力】', '【待補圖：表2-2 地下水位觀測紀錄】'].every((t) => outInfo.text.includes(t)), 'F 圖片與表格截圖換成【待補圖】佔位框');
   console.log('output figs', JSON.stringify(outInfo.figs));
   ok(outInfo.figs.join() === '圖2-1', '只剩 T 通用圖（圖2-1）沿用原圖');
-  ok(outInfo.holders.join() === '圖1-1,表2-1,表2-2', '重新讀入產出檔時，佔位框仍對應到正確的圖名與表名');
+  console.log('holders', JSON.stringify(outInfo.holders));
+  ok(outInfo.holders.filter((x) => typeof x === 'string').join() === '圖1-1,表2-1,表2-2', '重新讀入產出檔時，佔位框仍對應到正確的圖名與表名');
+  ok(outInfo.text.includes('【待補圖：未命名圖片】'), '沒有圖名的封面標誌（預設 F）換成【待補圖：未命名圖片】');
   ok(outInfo.text.includes('本案為新竹縣竹北市虛構活動中心新建工程'), '含專案事實的段落沒有被誤刪');
   ok(outInfo.text.includes('地上3層'), '地上層數已替換');
   ok(outInfo.text.includes('【待填：地址】') && !outInfo.text.includes('松竹路'), '未提供的地址標為待填，不帶入母本值');

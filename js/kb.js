@@ -227,7 +227,7 @@
       return t;
     };
     const entries = Object.values((memory && memory.entries) || {})
-      .filter((e) => !e.conflict && e.nh)
+      .filter((e) => !e.conflict && e.nh && !(RG.mem && RG.mem.isImgEntry(e)))
       .map((e) => ({ e, t: strip(e.nh), tags: new Set(e.tags || []) }));
     if (!entries.length) return [];
     const allTags = new Set();

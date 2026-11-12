@@ -223,6 +223,31 @@
   /* ====================================================================
    * 1. 母本解析
    * ==================================================================== */
+  /* 沒有圖名的圖片：計算圖片檔內容的指紋，供記憶庫使用 */
+  async function computeImageSigs(blocks, zip, rels) {
+    const cache = {};
+    for (const b of blocks) {
+      if (b.kind !== 'figure' || b.capName || !b.images || !b.images.length) continue;
+      const parts = [];
+      const names = [];
+      for (const rId of [...new Set(b.images)]) {
+        const target = rels[rId] || '';
+        const path = target.startsWith('/') ? target.slice(1) : 'word/' + target.replace(/^\.\//, '');
+        const f = zip.file(path);
+        if (!f) continue;
+        if (!cache[path]) {
+          const bytes = await f.async('uint8array');
+          cache[path] = RG.mem.hashBytes(bytes) + ':' + bytes.length;
+        }
+        parts.push(cache[path]);
+        names.push(path.split('/').pop());
+      }
+      if (parts.length) {
+        b.imgSig = parts.sort().join('+');
+        b.imgNames = names;
+      }
+    }
+  }
   async function readRels(zip) {
     const f = zip.file('word/_rels/document.xml.rels');
     if (!f) return {};
@@ -247,7 +272,7 @@
     return h('div', {}, img, more ? h('div', { class: 'reason' }, more) : null);
   }
   const blockText = (b) => {
-    if (b.kind === 'figure') return `［${b.capType === '表' ? '表格截圖' : '圖'}］${b.capNo ? (b.capType || '圖') + b.capNo + ' ' : ''}${b.capName || '（沒有圖名）'}`;
+    if (b.kind === 'figure') return `［${b.capType === '表' ? '表格截圖' : '圖'}］${b.capNo ? (b.capType || '圖') + b.capNo + ' ' : ''}${b.capName || `（沒有圖名${b.imgNames ? '：' + b.imgNames.join('、') + '，依圖片檔記憶' : ''}）`}`;
     return b.kind === 'rows' ? b.title + '\n' + b.text : b.text || '（空白）';
   };
   const kindLabel = (b) => (b.kind === 'figure' && b.capType === '表' ? '表格截圖' : b.boxText && b.kind === 'p' ? '段落（含文字方塊）' : K.KIND_LABEL[b.kind] || b.kind);
@@ -260,6 +285,7 @@
       const blocks = D.parseBlocks(doc, styles);
       const hfBlocks = await D.headerFooterBlocks(zip);
       const rels = await readRels(zip);
+      await computeImageSigs(blocks, zip, rels);
       K.classify(blocks, S.rules, S.facts);
       const report = D.structureReport(doc, styles, blocks);
       const sig = `${file.name}:${file.size}`;
